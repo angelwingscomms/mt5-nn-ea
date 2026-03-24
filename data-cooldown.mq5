@@ -15,11 +15,19 @@ struct BarRecord {
     int label_sell; // -1 = Pending, 0 = Loss, 1 = Win
 };
 
-struct TradeTrack { ulong ticket; int history_idx; int type; };
+struct TradeTrack { 
+    ulong ticket; 
+    int history_idx; 
+    int type; // 1 = Buy, 0 = Sell
+};
 
 BarRecord history[];
 TradeTrack active_trades[];
 int history_count = 0;
+
+// --- THE COOLDOWN ---
+datetime cooldown_until = 0;
+int COOLDOWN_MINUTES = 9;
 
 int OnInit() {
     rsi_h = iRSI(_Symbol, PERIOD_M1, 9, PRICE_CLOSE);
@@ -30,16 +38,24 @@ int OnInit() {
     ema144_h = iMA(_Symbol, PERIOD_M1, 144, 0, MODE_EMA, PRICE_CLOSE);
     ema216_h = iMA(_Symbol, PERIOD_M1, 216, 0, MODE_EMA, PRICE_CLOSE);
     ema540_h = iMA(_Symbol, PERIOD_M1, 540, 0, MODE_EMA, PRICE_CLOSE);
+    
+    // Optimize trade execution for tester speed
+    trade.SetExpertMagicNumber(144);
+    
     return(INIT_SUCCEEDED);
 }
 
 void OnTick() {
+    // ALWAYS check for closed trades every tick, even during cooldown
     CheckClosedTrades();
     
     static datetime last_bar;
     datetime curr_bar = iTime(_Symbol, PERIOD_M1, 0);
     if(curr_bar == last_bar) return;
     last_bar = curr_bar;
+
+    // --- ENFORCE 9 MINUTE COOLDOWN ---
+    if(curr_bar < cooldown_until) return;
 
     // 1. Record Data for the just-closed bar (Index 1)
     ArrayResize(history, history_count + 1);
@@ -68,29 +84,48 @@ void OnTick() {
     CalcVortex(1, rec.vi_plus, rec.vi_minus);
     history[history_count] = rec;
 
-    // 2. Place 1 Lot Trades ($144 = 1.44 points on Gold)
+    // 2. Place Trades to get the REAL market outcome (1000x Margin Truth)
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
     
-    if(trade.Buy(1.0, _Symbol, ask, ask - 1.44, ask + 1.44)) TrackTrade(trade.ResultOrder(), history_count, 1);
-    if(trade.Sell(1.0, _Symbol, bid, bid + 1.44, bid - 1.44)) TrackTrade(trade.ResultOrder(), history_count, 0);
+    double sl_buy = NormalizeDouble(ask - 1.44, digits);
+    double tp_buy = NormalizeDouble(ask + 1.44, digits);
+    if(trade.Buy(1.0, _Symbol, ask, sl_buy, tp_buy)) {
+        TrackTrade(trade.ResultOrder(), history_count, 1);
+    }
+    
+    double sl_sell = NormalizeDouble(bid + 1.44, digits);
+    double tp_sell = NormalizeDouble(bid - 1.44, digits);
+    if(trade.Sell(1.0, _Symbol, bid, sl_sell, tp_sell)) {
+        TrackTrade(trade.ResultOrder(), history_count, 0);
+    }
 
     history_count++;
+    
+    // 3. APPLY THE 9-MINUTE COOLDOWN
+    cooldown_until = curr_bar + (COOLDOWN_MINUTES * 60);
 }
 
 void CheckClosedTrades() {
     for(int i = ArraySize(active_trades) - 1; i >= 0; i--) {
+        // If the position no longer exists in the active positions list...
         if(!PositionSelectByTicket(active_trades[i].ticket)) {
+            // Check the history to see how it closed (TP, SL, or Margin Call)
             if(HistorySelectByPosition(active_trades[i].ticket)) {
                 double profit = 0;
-                for(int d = 0; d < HistoryDealsTotal(); d++) 
+                for(int d = 0; d < HistoryDealsTotal(); d++) {
                     profit += HistoryDealGetDouble(HistoryDealGetTicket(d), DEAL_PROFIT);
+                    profit += HistoryDealGetDouble(HistoryDealGetTicket(d), DEAL_SWAP); // Factor in swaps!
+                    profit += HistoryDealGetDouble(HistoryDealGetTicket(d), DEAL_COMMISSION); // Factor in commissions!
+                }
                 
-                int won = (profit > 0) ? 1 : 0; // 1 if Hit TP, 0 if Hit SL
+                // Real absolute truth: Did it make money after all broker fees?
+                int won = (profit > 0) ? 1 : 0; 
                 
-                if(active_trades[i].type == 1) // Buy Trade resolved
+                if(active_trades[i].type == 1) 
                     history[active_trades[i].history_idx].label_buy = won;
-                else if(active_trades[i].type == 0) // Sell Trade resolved
+                else if(active_trades[i].type == 0) 
                     history[active_trades[i].history_idx].label_sell = won;
             }
             ArrayRemove(active_trades, i, 1);
@@ -110,19 +145,18 @@ void CalcVortex(int index, double &vi_plus, double &vi_minus) {
     double sum_tr = 0, sum_vp = 0, sum_vm = 0;
     for(int i = 0; i < 9; i++) {
         int s = index + i;
-        double h = iHigh(_Symbol, PERIOD_CURRENT, s), l = iLow(_Symbol, PERIOD_CURRENT, s);
-        double c_prev = iClose(_Symbol, PERIOD_CURRENT, s+1);
+        double h = iHigh(_Symbol, PERIOD_M1, s), l = iLow(_Symbol, PERIOD_M1, s);
+        double c_prev = iClose(_Symbol, PERIOD_M1, s+1);
         sum_tr += MathMax(h-l, MathMax(MathAbs(h-c_prev), MathAbs(l-c_prev)));
-        sum_vp += MathAbs(h - iLow(_Symbol, PERIOD_CURRENT, s+1));
-        sum_vm += MathAbs(l - iHigh(_Symbol, PERIOD_CURRENT, s+1));
+        sum_vp += MathAbs(h - iLow(_Symbol, PERIOD_M1, s+1));
+        sum_vm += MathAbs(l - iHigh(_Symbol, PERIOD_M1, s+1));
     }
     vi_plus = (sum_tr == 0) ? 1.0 : sum_vp / sum_tr;
     vi_minus = (sum_tr == 0) ? 1.0 : sum_vm / sum_tr;
 }
 
 void OnDeinit(const int reason) {
-    int h = FileOpen("i.csv", FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ",");
-    // Added label_buy and label_sell columns
+    int h = FileOpen("ed.csv", FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ",");
     FileWrite(h, "time", "usdx_ret", "rsi", "atr", "adx", "vi_p", "vi_m", "e54", "e144", "e216", "e540", "macd_m", "macd_s", "macd_h", "label_buy", "label_sell");
     
     for(int i = 0; i < history_count; i++) {
@@ -133,5 +167,5 @@ void OnDeinit(const int reason) {
                   history[i].macd_hist, history[i].label_buy, history[i].label_sell);
     }
     FileClose(h);
-    Print("✅ CSV Exported.");
+    Print("✅ CSV Exported (9-Min Cooldown applied).");
 }
