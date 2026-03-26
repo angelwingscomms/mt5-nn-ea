@@ -1,4 +1,4 @@
-﻿//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
 //|                                  Live_Achilles_TickBar.mq5       |
 //+------------------------------------------------------------------+
 #include <Trade\Trade.mqh>
@@ -7,12 +7,12 @@
 
 input int    TICK_DENSITY  = 144;      // Variable Bar Density
 input double TP_POINTS     = 1.44;     // Target Profit
-input double SL_POINTS     = 1.44;      // 0 = ABSOLUTELY NO STOP LOSS
+input double SL_POINTS     = 0.0;      // 0 = ABSOLUTELY NO STOP LOSS
 input string USDX_Symbol   = "$USDX";  // USD Index Symbol
 input string USDJPY_Symbol = "USDJPY"; // Yield Proxy Symbol
 
-float means[35]={-0.000003f,0.286519f,48873.666667f,0.000149f,0.000146f,0.000303f,0.493767f,49.869564f,49.687725f,49.565113f,1.519998f,1.526129f,1.530636f,-0.073630f,-0.078442f,0.004813f,0.055322f,0.128952f,0.209752f,0.455186f,1.100607f,-490657.532075f,-318802.143319f,-243815.193814f,-50.171725f,-49.145609f,-48.455307f,-0.119320f,-0.286310f,-0.443835f,0.000000f,0.000000f,0.001019f,0.001431f,0.001770f};
-float stds[35]={0.000231f,0.062826f,125080.947769f,0.000151f,0.000146f,0.000167f,0.338452f,14.423269f,9.750540f,7.442737f,0.428174f,0.378513f,0.353843f,1.019579f,0.934306f,0.366638f,1.524156f,2.320060f,2.885289f,3.930968f,5.355729f,301580.169264f,189018.026698f,133811.444149f,31.042835f,30.984008f,31.482194f,3.401854f,4.997250f,6.198753f,0.000000f,0.000000f,0.000572f,0.000788f,0.000963f};
+float means[35] = {0.0f}; // ⚠️ PASTE FROM PYTHON
+float stds[35]  = {1.0f}; // ⚠️ PASTE FROM PYTHON
 
 CTrade trade;
 long onnx = INVALID_HANDLE;
@@ -77,7 +77,7 @@ void Predict() {
       f[19]=(float)(e54-c_a[x]); f[20]=(float)(e144-c_a[x]);
       f[21]=0; f[22]=0; f[23]=0;
       f[24]=CWPR(x,9); f[25]=CWPR(x,18); f[26]=CWPR(x,27);
-      f[27]=(float)(c_a[x]-c_a[x+9]); f[28]=(float)(c_a[x]-c_a[x+18]); f[29]=(float)(c_a[x]-c_a[x+27]);
+      f[27]=(float)(c_a[x]-c_a[MathMin(x+9, 119)]); f[28]=(float)(c_a[x]-c_a[MathMin(x+18, 119)]); f[29]=(float)(c_a[x]-c_a[MathMin(x+27, 119)]);
       f[30]=(float)((dx_a[x]-dx_a[x+1])/(dx_a[x+1]+1e-8)); f[31]=(float)((jp_a[x]-jp_a[x+1])/(jp_a[x+1]+1e-8));
       f[32]=CBBW(x,9); f[33]=CBBW(x,18); f[34]=CBBW(x,27);
       for(int k=0; k<35; k++) input_data[i*35+k]=(f[k]-means[k])/(stds[k]+1e-8f);
