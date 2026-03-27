@@ -29,12 +29,12 @@ The same applies to MACD (`f13-f15`), EMA distances (`f16-f20`), and Momentum (`
    * **EMA Distances (`f16-f20`):** Must be divided by Close. `(ta.ema(...) - df['close']) / df['close']`
    * **Momentum (`f27-f29`):** Must be divided by Close. `ta.mom(...) / df['close']`~~
 
-### CATEGORY 2: FAT-TAIL DISTRIBUTION COMPRESSION (The Scaling Flaw)
+### ~~CATEGORY 2: FAT-TAIL DISTRIBUTION COMPRESSION (The Scaling Flaw)~~ ✅ DONE
 **The Issue:**
-You are using standard scaling `(X - mean) / std`. Financial returns and indicator values have massive kurtosis (fat tails). A single "Black Swan" tick-bar (e.g., a flash crash) will have a deviation of $20\sigma$. When you divide by the standard deviation, the 99% of normal, actionable market data gets compressed into a tiny microscopic band between $[-0.05, +0.05]$. The neural network cannot distinguish signals because the variance has been crushed by outliers.
+~~You are using standard scaling `(X - mean) / std`. Financial returns and indicator values have massive kurtosis (fat tails). A single "Black Swan" tick-bar (e.g., a flash crash) will have a deviation of $20\sigma$. When you divide by the standard deviation, the 99% of normal, actionable market data gets compressed into a tiny microscopic band between $[-0.05, +0.05]$. The neural network cannot distinguish signals because the variance has been crushed by outliers.~~
 
 **Agent Directive:**
-Replace Mean/Std scaling with **Robust Scaling (Median and IQR)**.
+~~Replace Mean/Std scaling with **Robust Scaling (Median and IQR)**.
 1. **In Python (Section 5):**
    * Calculate `median = np.median(X_train, axis=0)`
    * Calculate `iqr = np.percentile(X_train, 75, axis=0) - np.percentile(X_train, 25, axis=0)`
@@ -42,29 +42,29 @@ Replace Mean/Std scaling with **Robust Scaling (Median and IQR)**.
 2. **In Python (Section 7) & MQL5:**
    * Export `medians` and `iqrs` arrays instead of `means` and `stds`.
    * Update the normalization loop in MQL5 `Predict()` to: 
-     `input_data[i*35+k] = (f[k] - medians[k]) / (iqrs[k] + 1e-8f);`
+     `input_data[i*35+k] = (f[k] - medians[k]) / (iqrs[k] + 1e-8f);`~~
 
-### CATEGORY 3: THE EMBARGO LEAKAGE (Validation Contamination)
+### ~~CATEGORY 3: THE EMBARGO LEAKAGE (Validation Contamination)~~ ✅ DONE
 **The Issue:**
-Your target labeling looks ahead `H=30` bars. 
-Because your splits are contiguous (`train_end = int(n_samples * 0.70)`), the last 30 bars of your training set contain future data from the first 30 bars of your validation set. The model secretly overfits to the transition boundary, which artificially manipulates training loss but harms true validation generalization.
+~~Your target labeling looks ahead `H=30` bars. 
+Because your splits are contiguous (`train_end = int(n_samples * 0.70)`), the last 30 bars of your training set contain future data from the first 30 bars of your validation set. The model secretly overfits to the transition boundary, which artificially manipulates training loss but harms true validation generalization.~~
 
 **Agent Directive:**
-Introduce an **Embargo Period** (gap) between train, validation, and test sets.
+~~Introduce an **Embargo Period** (gap) between train, validation, and test sets.
 1. **In Python (Section 5):**
    ```python
    # Apply H-bar embargo to prevent leakage across split boundaries
    X_train, y_train = X[:train_end], y[:train_end]
    X_val, y_val = X[train_end + H : val_end], y[train_end + H : val_end]
    X_test, y_test = X[val_end + H :], y[val_end + H :]
-   ```
+   ```~~
 
-### CATEGORY 4: ARCHITECTURAL OVERFITTING (Missing Regularization)
+### ~~CATEGORY 4: ARCHITECTURAL OVERFITTING (Missing Regularization)~~ ✅ DONE
 **The Issue:**
-You are feeding a high-dimensional, noisy time-series into an LSTM and Multi-Head Attention block with zero regularization. The network will perfectly memorize the training noise instead of extracting generalized features. Furthermore, Attention layers without Layer Normalization suffer from exploding/vanishing gradients during optimization.
+~~You are feeding a high-dimensional, noisy time-series into an LSTM and Multi-Head Attention block with zero regularization. The network will perfectly memorize the training noise instead of extracting generalized features. Furthermore, Attention layers without Layer Normalization suffer from exploding/vanishing gradients during optimization.~~
 
 **Agent Directive:**
-Inject `LayerNormalization` and `Dropout` into the Neural Network architecture.
+~~Inject `LayerNormalization` and `Dropout` into the Neural Network architecture.
 1. **In Python (Section 6), rewrite the architecture exactly as follows:**
    ```python
    in_lay = tf.keras.Input(shape=(120, 35))
@@ -87,14 +87,14 @@ Inject `LayerNormalization` and `Dropout` into the Neural Network architecture.
    do = tf.keras.layers.Dropout(0.3)(pl)
    d1 = tf.keras.layers.Dense(20, activation='mish', kernel_regularizer=tf.keras.regularizers.L2(1e-4))(do)
    ou = tf.keras.layers.Dense(3, activation='softmax')(d1)
-   ```
+   ```~~
 
-### CATEGORY 5: THE CLASS 0 DOMINANCE
+### ~~CATEGORY 5: THE CLASS 0 DOMINANCE~~ ✅ DONE
 **The Issue:**
-You are operating on 144-tick bars. Depending on the asset, a 144-tick bar might only move 0.1 points. Asking it to hit `TP=1.44` or `SL=0.50` within `H=30` bars might only be possible during the New York open, causing 90%+ of your dataset to be Class 0 (Do Nothing). Even with class weights, the network struggles.
+~~You are operating on 144-tick bars. Depending on the asset, a 144-tick bar might only move 0.1 points. Asking it to hit `TP=1.44` or `SL=0.50` within `H=30` bars might only be possible during the New York open, causing 90%+ of your dataset to be Class 0 (Do Nothing). Even with class weights, the network struggles.~~
 **Agent Directive (Optional but Highly Recommended):**
-*   Check the class distribution printed during training. If Class 0 is > 85%, your `TP` and `SL` values are too wide for a 144-tick timeframe. 
-*   **Action:** Reduce `TP_POINTS` to 0.72 and `SL_POINTS` to 0.35 in both Python and MQL5 to increase signal frequency, providing the network with more balanced positive/negative examples to learn from.
+*   ~~Check the class distribution printed during training. If Class 0 is > 85%, your `TP` and `SL` values are too wide for a 144-tick timeframe. 
+*   **Action:** Reduce `TP_POINTS` to 0.72 and `SL_POINTS` to 0.35 in both Python and MQL5 to increase signal frequency, providing the network with more balanced positive/negative examples to learn from.~~
 
 ---
 
@@ -120,33 +120,33 @@ f[29]=(float)((c_a[x]-c_a[RingIdx(119-i+27)])/c_a[x]);
 
 Implementing these mathematical alignments will fundamentally transform the signal-to-noise ratio, allowing the Attention mechanism to find persistent, regime-agnostic patterns, drastically raising `val_accuracy`.
 
-#### FLAW 6: INCOMPLETE SCALE-INVARIANCE (ATR Left Behind)
-**The Issue:** The agent successfully divided MACD, Momentum, and EMA deviation by `Close`, but left ATR as an absolute dollar value in both Python and MQL5. ATR scales linearly with asset price.
+#### ~~FLAW 6: INCOMPLETE SCALE-INVARIANCE (ATR Left Behind)~~ ✅ DONE
+**The Issue:** ~~The agent successfully divided MACD, Momentum, and EMA deviation by `Close`, but left ATR as an absolute dollar value in both Python and MQL5. ATR scales linearly with asset price.~~
 **Agent Directive:**
-*   **In Python:** Change `df[f'f{f_idx}'] = tr.rolling(p).mean()` to `df[f'f{f_idx}'] = tr.rolling(p).mean() / df['close']`
-*   **In MQL5 (`Predict()`):** Change `f[10]=CATR(x,9);` to `f[10]=(float)(CATR(x,9)/c_a[x]);` (apply to 9, 18, and 27 periods).
+*   ~~**In Python:** Change `df[f'f{f_idx}'] = tr.rolling(p).mean()` to `df[f'f{f_idx}'] = tr.rolling(p).mean() / df['close']`
+*   **In MQL5 (`Predict()`):** Change `f[10]=CATR(x,9);` to `f[10]=(float)(CATR(x,9)/c_a[x]);` (apply to 9, 18, and 27 periods).~~
 
-#### FLAW 7: CONTIGUOUS SPLIT LEAKAGE (Missing Embargo)
-**The Issue:** The dataset is split sequentially: `train_end = 0.70`, `val_start = 0.70`. Because the labeling function `label()` looks ahead `H=30` bars, the last 30 bars of the training set contain labels derived from the first 30 bars of the validation set. The model memorizes the validation data, resulting in false confidence during training.
+#### ~~FLAW 7: CONTIGUOUS SPLIT LEAKAGE (Missing Embargo)~~ ✅ DONE
+**The Issue:** ~~The dataset is split sequentially: `train_end = 0.70`, `val_start = 0.70`. Because the labeling function `label()` looks ahead `H=30` bars, the last 30 bars of the training set contain labels derived from the first 30 bars of the validation set. The model memorizes the validation data, resulting in false confidence during training.~~
 **Agent Directive:**
-*   **In Python:** You must enforce an Embargo Gap equal to the horizon `H`.
+*   ~~**In Python:** You must enforce an Embargo Gap equal to the horizon `H`.
     ```python
     X_train, y_train = X[:train_end], y[:train_end]
     X_val, y_val = X[train_end + H : val_end], y[train_end + H : val_end]
     X_test, y_test = X[val_end + H :], y[val_end + H :]
-    ```
+    ```~~
 
-#### FLAW 8: FAT-TAIL DISTRIBUTION DESTRUCTION (Standard vs Robust Scaling)
-**The Issue:** Financial data is non-Gaussian (fat-tailed). Using standard `mean` and `std` scaling compresses 99% of normal market movements into a tiny range to accommodate massive outliers (e.g., flash crashes). The neural network cannot differentiate signals in a compressed range.
+#### ~~FLAW 8: FAT-TAIL DISTRIBUTION DESTRUCTION (Standard vs Robust Scaling)~~ ✅ DONE
+**The Issue:** ~~Financial data is non-Gaussian (fat-tailed). Using standard `mean` and `std` scaling compresses 99% of normal market movements into a tiny range to accommodate massive outliers (e.g., flash crashes). The neural network cannot differentiate signals in a compressed range.~~
 **Agent Directive:**
-*   **In Python:** Replace `mean` and `std` with `median` and `iqr` (Interquartile Range).
+*   ~~**In Python:** Replace `mean` and `std` with `median` and `iqr` (Interquartile Range).
     ```python
     median = np.median(X_train, axis=0)
     iqr = np.percentile(X_train, 75, axis=0) - np.percentile(X_train, 25, axis=0)
     X_train_seq, y_train_seq = win((X_train - median) / (iqr + 1e-8), y_train, H)
     ```
 *   **In Python (Export):** Export `medians` and `iqrs` arrays to MQL5 instead of `means` and `stds`.
-*   **In MQL5 (`Predict()`):** Replace `means[k]` and `stds[k]` with `medians[k]` and `iqrs[k]`.
+*   **In MQL5 (`Predict()`):** Replace `means[k]` and `stds[k]` with `medians[k]` and `iqrs[k]`.~~
 
 ---
 

@@ -98,6 +98,11 @@ df['f10'] = ta.atr(df['high'], df['low'], df['close'], length=9) / df['close']
 df['f11'] = ta.atr(df['high'], df['low'], df['close'], length=18) / df['close']
 df['f12'] = ta.atr(df['high'], df['low'], df['close'], length=27) / df['close']
 
+# Store raw ATR values for TP/SL calculation (not normalized)
+df['atr9'] = ta.atr(df['high'], df['low'], df['close'], length=9)
+df['atr18'] = ta.atr(df['high'], df['low'], df['close'], length=18)
+df['atr27'] = ta.atr(df['high'], df['low'], df['close'], length=27)
+
 # FLAW 1 FIX: MACD normalized by Close for stationarity
 m = ta.macd(df['close'], 9, 18, 9)
 df['f13'], df['f14'], df['f15'] = m.iloc[:,0] / df['close'], m.iloc[:,2] / df['close'], m.iloc[:,1] / df['close']
@@ -134,11 +139,18 @@ df.dropna(inplace=True)
 # 4. TARGETING
 # FIX FLAW 1.3: Handle simultaneous TP/SL breaches properly
 # If both TP and SL are breached in the same bar, default to Stop Loss (worst-case)
-TP, SL, H = 1.44, 0.50, 30
-def label(df, tp, sl, h):
+# ATR-based TP and SL: TP = 2.7*ATR, SL = 0*ATR (disabled in training)
+TP_MULTIPLIER = 2.7
+SL_MULTIPLIER = 0.0  # SL disabled in training (0*ATR)
+H = 30
+def label(df, tp_mult, sl_mult, h):
     c, hi, lo = df.close.values, df.high.values, df.low.values
+    atr = df.atr18.values  # Use ATR18 for TP/SL calculation
     t = np.zeros(len(df), dtype=int)
     for i in range(len(df)-h):
+        # Calculate ATR-based TP and SL for this bar
+        tp = tp_mult * atr[i]
+        sl = sl_mult * atr[i]
         up, lw = c[i]+tp, c[i]-sl
         for j in range(i+1, i+h+1):
             tp_hit = hi[j] >= up
@@ -156,7 +168,7 @@ def label(df, tp, sl, h):
     return t
 
 print("Labeling data...")
-df['target'] = label(df, TP, SL, H)
+df['target'] = label(df, TP_MULTIPLIER, SL_MULTIPLIER, H)
 
 # 5. MODEL PREP
 # FIX FLAW 1.2: Split data BEFORE calculating normalization parameters
@@ -171,9 +183,11 @@ n_samples = len(X)
 train_end = int(n_samples * 0.70)
 val_end = int(n_samples * 0.85)
 
+# FLAW 3 FIX: Add H-bar embargo to prevent leakage across split boundaries
+# The labeling function looks ahead H=30 bars, so we must skip H bars at each boundary
 X_train, y_train = X[:train_end], y[:train_end]
-X_val, y_val = X[train_end:val_end], y[train_end:val_end]
-X_test, y_test = X[val_end:], y[val_end:]
+X_val, y_val = X[train_end + H : val_end], y[train_end + H : val_end]
+X_test, y_test = X[val_end + H :], y[val_end + H :]
 
 # FLAW 2 FIX: Use Robust Scaling (Median/IQR) instead of Mean/Std
 # Financial data has fat tails - standard scaling compresses 99% of normal
@@ -202,31 +216,30 @@ X_val_seq, y_val_seq = win(X_val_s, y_val, H)
 X_test_seq, y_test_seq = win(X_test_s, y_test, H)
 
 # 6. MODEL ARCHITECTURE
-# FIX FLAW 3.1: Contextual Last-Step Extraction
-# WHY GlobalAveragePooling1D FAILS: Gives equal weight to Bar 1 and Bar 120, diluting
-# current market state with stale data.
-# WHY Flatten() FAILS: Multiplies feature dimension by 120 (4,200 inputs to Dense),
-# causing parameter explosion and catastrophic overfitting on noisy financial data.
-# WHY CONTEXTUAL LAST-STEP EXTRACTION IS SUPERIOR: MultiHeadAttention(ls, ls) means
-# the output at T=120 is already a dynamically calculated, weighted sum of ALL
-# previous 119 timesteps. Extracting the last timestep performs Attention Pooling
-# conditioned exclusively on the most recent market state.
-#
-# Tensor shape pipeline:
-# in_lay: (None, 120, 35) -> ls: (None, 120, 35) -> at: (None, 120, 35)
-# -> res_add: (None, 120, 35) -> pl: (None, 35) -> ou: (None, 3)
+# FIX FLAW 4: ARCHITECTURAL OVERFITTING - Add LayerNormalization and Dropout
+# LayerNormalization prevents exploding/vanishing gradients in Attention layers
+# Dropout prevents memorization of training noise
+# L2 regularization on Dense layers penalizes large weights
 in_lay = tf.keras.Input(shape=(120, 35))
+
+# LSTM Layer
 ls = tf.keras.layers.LSTM(35, return_sequences=True, activation='mish')(in_lay)
-at = tf.keras.layers.MultiHeadAttention(num_heads=4, key_dim=35)(ls, ls)
+ls_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)(ls)
 
-# 1. Compute the Residual Connection (combining sequential memory + global attention)
-res_add = tf.keras.layers.Add(name="Residual_Add")([ls, at])
+# Self-Attention with Dropout
+at = tf.keras.layers.MultiHeadAttention(num_heads=4, key_dim=35, dropout=0.2)(ls_norm, ls_norm)
 
-# 2. Extract the final causal timestep (Index -1) to serve as the context vector
-# tf2onnx perfectly supports this slicing operation via opset 13.
-pl = tf.keras.layers.Lambda(lambda x: x[:, -1, :], name="Extract_Last_Step")(res_add)
+# Residual Connection & Normalization
+res_add = tf.keras.layers.Add(name="Residual_Add")([ls_norm, at])
+res_norm = tf.keras.layers.LayerNormalization(epsilon=1e-6)(res_add)
 
-ou = tf.keras.layers.Dense(3, activation='softmax')(tf.keras.layers.Dense(20, activation='mish')(pl))
+# Context Extraction (Last Step)
+pl = tf.keras.layers.Lambda(lambda x: x[:, -1, :], name="Extract_Last_Step")(res_norm)
+
+# Dense Network with Dropout Regularization
+do = tf.keras.layers.Dropout(0.3)(pl)
+d1 = tf.keras.layers.Dense(20, activation='mish', kernel_regularizer=tf.keras.regularizers.L2(1e-4))(do)
+ou = tf.keras.layers.Dense(3, activation='softmax')(d1)
 
 model = tf.keras.Model(in_lay, ou)
 model.compile(optimizer='adamw', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
@@ -245,7 +258,7 @@ print(f"Class weights: {class_weight_dict}")
 print("Starting training...")
 # Use explicit validation data instead of validation_split to ensure no leakage
 # Pass class_weight to aggressively penalize the model for missing Class 1 (Buy) and Class 2 (Sell)
-model.fit(X_train_seq, y_train_seq, epochs=54, batch_size=64, 
+model.fit(X_train_seq, y_train_seq, epochs=9, batch_size=64, 
           validation_data=(X_val_seq, y_val_seq),
           class_weight=class_weight_dict)
 

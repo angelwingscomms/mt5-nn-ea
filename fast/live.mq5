@@ -6,8 +6,8 @@
 #resource "\\Files\\achilles_144.onnx" as uchar model_buffer[]
 
 input int    TICK_DENSITY  = 144;      // Variable Bar Density
-input double TP_POINTS     = 1.44;     // Target Profit
-input double SL_POINTS     = 0.0;      // 0 = ABSOLUTELY NO STOP LOSS
+input double TP_MULTIPLIER = 2.7;      // TP = 2.7 * ATR
+input double SL_MULTIPLIER = 0.54;     // SL = 0.54 * ATR
 input string USDX_Symbol   = "$USDX";  // USD Index Symbol
 input string USDJPY_Symbol = "USDJPY"; // Yield Proxy Symbol
 input int    MAGIC_NUMBER  = 144144;   // FLAW 4.3 FIX: Magic Number for position identification
@@ -368,8 +368,13 @@ void Predict() {
 }
 
 void Execute(ENUM_ORDER_TYPE type, double p) {
-   double sl = (SL_POINTS <= 0) ? 0 : (type==ORDER_TYPE_BUY ? p-SL_POINTS : p+SL_POINTS);
-   double tp = (type==ORDER_TYPE_BUY ? p+TP_POINTS : p-TP_POINTS);
+   // Calculate ATR-based TP and SL
+   double atr = CATR(RingIdx(0), 18);  // Use ATR18 for TP/SL calculation
+   double tp_points = TP_MULTIPLIER * atr;
+   double sl_points = SL_MULTIPLIER * atr;
+   
+   double sl = (sl_points <= 0) ? 0 : (type==ORDER_TYPE_BUY ? p-sl_points : p+sl_points);
+   double tp = (type==ORDER_TYPE_BUY ? p+tp_points : p-tp_points);
    if(type==ORDER_TYPE_BUY) trade.Buy(0.01,_Symbol,p,sl,tp); else trade.Sell(0.01,_Symbol,p,sl,tp);
 }
 
