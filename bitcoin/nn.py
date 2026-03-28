@@ -71,7 +71,7 @@ def get_labels(df):
     t = np.zeros(len(df), dtype=int)
     for i in range(len(df)-TARGET_HORIZON):
         if np.isnan(atr[i]): continue
-        up, lw = c[i]+(0.72*atr[i]), c[i]-(0.09*atr[i])
+        up, lw = c[i]+(2.7*atr[i]), c[i]-(0.54*atr[i])
         for j in range(i+1, i+TARGET_HORIZON+1):
             if hi[j] >= up: t[i] = 1; break 
             if lo[j] <= lw: t[i] = 2; break 
@@ -80,10 +80,22 @@ def get_labels(df):
 df['target'] = get_labels(df)
 X, y = df[[f'f{i}' for i in range(17)]].values, df['target'].values
 
+# ======================================================================
+# 🛡️ ARMOR-PLATED TENSOR SCALING
+# ======================================================================
 split_time = int(len(X) * 0.9)
 median = np.median(X[:split_time], axis=0)
-iqr = np.percentile(X[:split_time], 75, axis=0) - np.percentile(X[:split_time], 25, axis=0) + 1e-8
+iqr = np.percentile(X[:split_time], 75, axis=0) - np.percentile(X[:split_time], 25, axis=0)
+
+# CRITICAL FIX: Prevent Micro-Variance Scaling Explosions
+# If a feature has zero variance in the small training window, default its scale to 1.0
+iqr = np.where(iqr < 1e-4, 1.0, iqr)
+
 X_s = (X - median) / iqr
+
+# CRITICAL FIX: Strict Feature Space Clipping
+# No input feature is mathematically allowed to exceed +/- 10 standard deviations.
+X_s = np.clip(X_s, -10.0, 10.0)
 
 X_seq, y_seq = [],[]
 for i in range(len(X_s)-SEQ_LEN):
@@ -125,40 +137,47 @@ X_train = X_train.reshape(-1, 2040)
 X_val   = X_val.reshape(-1, 2040)
 
 # ======================================================================
-# CAUSAL TCN ARCHITECTURE
+# 🛡️ L2-REGULARIZED CAUSAL TCN ARCHITECTURE
 # ======================================================================
+from tensorflow.keras import regularizers
+
 def tcn_block(x, filters, dilation):
-    shortcut = layers.Conv1D(filters, 1, padding='same')(x)
-    x = layers.Conv1D(filters, 3, padding='causal', dilation_rate=dilation, activation='relu')(x)
+    # Added L2 regularization to completely eliminate weight explosions
+    reg = regularizers.l2(1e-4)
+    
+    shortcut = layers.Conv1D(filters, 1, padding='same', kernel_regularizer=reg)(x)
+    x = layers.Conv1D(filters, 3, padding='causal', dilation_rate=dilation, 
+                      activation='relu', kernel_regularizer=reg)(x)
     x = layers.LayerNormalization()(x)
-    x = layers.Conv1D(filters, 3, padding='causal', dilation_rate=dilation, activation='relu')(x)
+    x = layers.Conv1D(filters, 3, padding='causal', dilation_rate=dilation, 
+                      activation='relu', kernel_regularizer=reg)(x)
     x = layers.LayerNormalization()(x)
     return layers.Add()([shortcut, x])
 
 inp = Input(shape=(2040,), name="input")
 x = layers.Reshape((120, 17))(inp)
-for d in [1, 2, 4, 8, 16]: 
+
+for d in[1, 2, 4, 8, 16]: 
     x = tcn_block(x, 64, d)
 
 x = layers.GlobalAveragePooling1D()(x)
-x = layers.Dense(128, activation='relu')(x)
-x = layers.Dropout(0.3)(x)
+x = layers.Dense(128, activation='relu', kernel_regularizer=regularizers.l2(1e-4))(x)
+x = layers.Dropout(0.4)(x) # Increased dropout for extreme small-sample protection
 out = layers.Dense(3, activation='softmax', name="output")(x)
 
 model = Model(inp, out)
 
-# Added clipnorm to prevent TCN gradient explosion
-model.compile(optimizer=tf.keras.optimizers.AdamW(1e-3, clipnorm=1.0), 
+model.compile(optimizer=tf.keras.optimizers.AdamW(1e-3, weight_decay=1e-4, clipnorm=1.0), 
               loss='sparse_categorical_crossentropy', 
               metrics=['accuracy'])
 
-# Defensive weighting against mode collapse
+# Defend against mode collapse dynamically
 cw = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
 class_weights = {i: w for i, w in zip(np.unique(y_train), cw)}
 
-callbacks = [
-    EarlyStopping(monitor='val_loss', patience=12, restore_best_weights=True, mode='min', verbose=1),
-    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, mode='min', verbose=1)
+callbacks =[
+    EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True, verbose=1),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1)
 ]
 
 print("\n[INFO] Commencing Training Phase...")

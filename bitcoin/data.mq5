@@ -1,16 +1,15 @@
 #property script_show_inputs
 input int ticks_to_export = 2160000;
+input int days_lookback   = 180;     // Force anchor 6 months into the past
 input int chunk_size      = 100000;
 
 void OnStart() {
-   Print("[INFO] Initializing High-Throughput Tick Export Engine...");
-   
-   // Clear errors before starting
-   ResetLastError(); 
-   
+   Print("[INFO] Initializing Absolute-Chronological Tick Export...");
+   ResetLastError();
+
    int h = FileOpen("fast/bitcoin_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
    if(h == INVALID_HANDLE) { 
-      PrintFormat("❌ FATAL I/O ERROR: Cannot open file. MQL5 Error Code: %d", GetLastError()); 
+      Print("❌ FATAL I/O ERROR: Cannot open CSV file."); 
       return; 
    }
    
@@ -18,55 +17,53 @@ void OnStart() {
    
    MqlTick ticks[];
    int total_copied = 0;
-   ulong last_time  = 0;
-   ulong start_time = GetTickCount64();
    
-   Print("[INFO] Handshake complete. Commencing synchronous sequence. MT5 may download missing history. Stand by...");
+   // CRITICAL FIX: Establish a strict temporal anchor in the deep past (Safe 64-bit math)
+   ulong anchor_msc = ((ulong)TimeCurrent() - ((ulong)days_lookback * 86400ull)) * 1000ull;
+   ulong last_time  = anchor_msc;
+   
+   PrintFormat("[INFO] Temporal Anchor set to %d days ago. Moving strictly forward in time...", days_lookback);
    
    while(total_copied < ticks_to_export) {
       int to_copy = MathMin(chunk_size, ticks_to_export - total_copied);
       
-      // Measure precise network/disk retrieval time
       ulong fetch_start = GetTickCount64();
       int copied = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, last_time, to_copy);
       ulong fetch_time = GetTickCount64() - fetch_start;
       
       if(copied <= 0) {
-         int err = GetLastError();
-         PrintFormat("⚠️ WARNING: Tick stream exhausted or network failure. Copied: %d | Error Code: %d", copied, err);
-         if (err == 4401) Print("💡 Hint: Error 4401 means History Not Found. Broker server lacks requested depth.");
+         PrintFormat("⚠️ Stream exhausted. The broker has no more historical data. Copied: %d | Total: %d", copied, total_copied);
          break;
       }
       
-      // Advance the temporal pointer to prevent infinite loops on the exact same millisecond
+      // Advance pointer strictly forward to the exact millisecond after the last recorded tick
       last_time = ticks[copied-1].time_msc + 1; 
       
       int valid_ticks = 0;
-      
-      // SERIALIZATION PHASE: Direct OS-Level buffering. Zero O(N^2) heap allocations.
       for(int i = 0; i < copied; i++) {
-         // Sanitize structural anomalies (negative spreads / zeroed bids)
-         if(ticks[i].bid <= 0.0 || ticks[i].ask < ticks[i].bid) continue;
+         if(ticks[i].bid <= 0.0 || ticks[i].ask < ticks[i].bid) continue; // Noise filter
          
          double v = (ticks[i].volume > 0) ? (double)ticks[i].volume : 1.0;
-         
-         // FileWrite automatically maps array arguments to CSV columns based on FileOpen delimiter
          FileWrite(h, ticks[i].time_msc, ticks[i].bid, ticks[i].ask, v);
          valid_ticks++;
       }
       
       total_copied += copied;
       
-      // Telemetry Output
+      // Real-time telemetry: Watch the date advance chronologically
       double progress = ((double)total_copied / ticks_to_export) * 100.0;
-      PrintFormat("[STREAM] %.2f%% | Fetched: %d ticks in %llu ms | Validated: %d | Total: %d / %d", 
-                  progress, copied, fetch_time, valid_ticks, total_copied, ticks_to_export);
+      PrintFormat("[STREAM] %.2f%% | Fetched: %d | Processing Date: %s | Total: %d / %d", 
+                  progress, copied, TimeToString(ticks[copied-1].time), total_copied, ticks_to_export);
                   
-      // CRITICAL: Yield thread to MT5 GUI to prevent "Not Responding" freeze lock
-      Sleep(10); 
+      // Halt if we slam into the present moment
+      if(last_time >= (ulong)TimeCurrent() * 1000ull) {
+          Print("[INFO] Temporal pointer reached the present moment. Halting stream.");
+          break;
+      }
+                  
+      Sleep(10); // Yield to MT5 Main Thread
    }
    
    FileClose(h);
-   ulong elapsed = GetTickCount64() - start_time;
-   PrintFormat("✅ TELEMETRY COMPLETE. Serialized %d ticks. Total Execution Time: %.2f seconds.", total_copied, elapsed / 1000.0);
+   PrintFormat("✅ EXPORT COMPLETE. Serialized %d ticks. Proceed to Python tensor generation.", total_copied);
 }
