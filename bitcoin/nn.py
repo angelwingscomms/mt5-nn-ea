@@ -138,5 +138,5 @@ model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec, opset=1
 with open("bitcoin_144.onnx", "wb") as f: f.write(model_proto.SerializeToString())
 
 print("\n--- PASTE THESE INTO live.mq5 ---")
-print(f"float medians[35] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
-print(f"float iqrs[35] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")
+print(f"float medians[17] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
+print(f"float iqrs[17] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")

@@ -1,15 +1,15 @@
 ﻿#include <Trade\Trade.mqh>
-#resource "\\Experts\\nn\\bitcoin_144.onnx" as uchar model_buffer[]
+#resource "\\Experts\\nn\\bitcoin\\bitcoin_144.onnx" as uchar model_buffer[]
 
 input int TICK_DENSITY = 144;
-input double SL_MULTIPLIER = 5.4;
-input double TP_MULTIPLIER = 27.0;
+input double SL_MULTIPLIER = 0.09;
+input double TP_MULTIPLIER = 2.7;
 long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
 // PASTE FROM PYTHON OUTPUT
-float medians[17] = {0.0f...}; 
-float iqrs[17]    = {1.0f...};
+float medians[17] = {0.00000000f, 27.00000000f, 70.73900000f, 0.00012056f, 0.00012359f, 0.00068856f, 0.50000000f, -0.00000263f, -0.00000316f, -0.00000581f, 0.00071232f, 0.00000000f, -0.00000000f, 0.00000000f, -0.22252093f, 0.89199804f, 0.00026568f};
+float iqrs[17] = {0.00065647f, 0.03472222f, 30.58600000f, 0.00020881f, 0.00021586f, 0.00048541f, 0.62345182f, 0.00075497f, 0.00072372f, 0.00021932f, 0.00032388f, 1.41421356f, 1.41421356f, 1.56366296f, 1.52445867f, 1.00000000f, 0.00450346f};
 
 struct Bar { 
    double o, h, l, c, v, spread, tvwp, atr18, macd_ema12, macd_ema26, macd_sig; 
