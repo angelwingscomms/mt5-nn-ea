@@ -14,7 +14,7 @@ void OnStart() {
       return;
    }
 
-   int h = FileOpen("fast/bitcoin_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   int h = FileOpen("achilles_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
    if(h == INVALID_HANDLE) return;
 
    FileWrite(h, "time_msc", "bid", "ask");

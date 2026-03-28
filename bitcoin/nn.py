@@ -4,61 +4,55 @@ import pandas_ta as ta
 import tensorflow as tf
 import tf2onnx
 import os
-import argparse
+from tensorflow.keras import layers, Model, Input
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from sklearn.utils.class_weight import compute_class_weight
 
+# PATHS
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_TICK_DATA = os.path.join(SCRIPT_DIR, 'bitcoin_ticks.csv')
-
-parser = argparse.ArgumentParser()
-parser.add_argument('--tick-density', type=int, default=144)
-args = parser.parse_args()
-
-TICK_DENSITY = args.tick_density
+TICK_DENSITY = 144
 OUTPUT_ONNX_MODEL = os.path.join(SCRIPT_DIR, f'bitcoin_{TICK_DENSITY}.onnx') 
 
+if not os.path.exists(INPUT_TICK_DATA):
+    print(f"❌ Error: {INPUT_TICK_DATA} not found.")
+    exit()
+
+print("Loading and preparing Microstructure Bars...")
 df_t = pd.read_csv(INPUT_TICK_DATA)
-df_t = df_t[(df_t['bid'] > 0) & (df_t['ask'] > 0)].copy() # Defend against -Inf Logs
-
-print("Constructing Tick Bars...")
+df_t['vol'] = df_t['vol'].replace(0, 1.0) 
 df_t['bar_id'] = np.arange(len(df_t)) // TICK_DENSITY
-df_t['spread_tick'] = df_t['ask'] - df_t['bid']
 
-df_agg = df_t.groupby('bar_id').agg({
-    'bid':['first', 'max', 'min', 'last'],
-    'time_msc': ['first', 'last'],
-    'spread_tick': 'mean'
+df = df_t.groupby('bar_id').agg({
+    'bid': ['first', 'max', 'min', 'last'],
+    'vol': 'sum',
+    'time_msc': 'first'
 })
+df.columns = ['open', 'high', 'low', 'close', 'volume', 'time_open']
+df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask']-x['bid']).mean()).values
 
-df = pd.DataFrame({
-    'open': df_agg[('bid', 'first')].values,
-    'high': df_agg[('bid', 'max')].values,
-    'low': df_agg[('bid', 'min')].values,
-    'close': df_agg[('bid', 'last')].values,
-    'spread': df_agg[('spread_tick', 'mean')].values,
-    'time_open': df_agg[('time_msc', 'first')].values,
-    'time_close': df_agg[('time_msc', 'last')].values
-})
-df['duration'] = df['time_close'] - df['time_open']
-df.dropna(inplace=True)
-
-print("Building Features...")
+print("Engineering 39 Institutional Features...")
+df['tpv'] = df['close'] * df['volume']
+df['tvwp'] = df['tpv'].rolling(144).sum() / (df['volume'].rolling(144).sum() + 1e-8)
+df['f38'] = (df['close'] - df['tvwp']) / df['close'] 
+df['dt'] = pd.to_datetime(df['time_open'], unit='ms')
+df['f33'] = np.sin(2 * np.pi * df['dt'].dt.hour / 24)
+df['f34'] = np.cos(2 * np.pi * df['dt'].dt.hour / 24)
+df['f35'] = np.sin(2 * np.pi * df['dt'].dt.dayofweek / 7)
+df['f36'] = np.cos(2 * np.pi * df['dt'].dt.dayofweek / 7)
+df['f37'] = np.log(df['volume'] + 1)
 df['f0'] = np.log(df['close'] / df['close'].shift(1))
 df['f1'] = df['spread']
-df['f2'] = df['duration'] / 1000.0 
+df['f2'] = df['dt'].diff().dt.total_seconds().fillna(0) / 1000.0
 df['f3'] = (df['high'] - df[['open', 'close']].max(axis=1)) / df['close']
 df['f4'] = (df[['open', 'close']].min(axis=1) - df['low']) / df['close']
 df['f5'] = (df['high'] - df['low']) / df['close']
 df['f6'] = (df['close'] - df['low']) / (df['high'] - df['low'] + 1e-8)
 
 for p, f_idx in zip([9, 18, 27], [7, 8, 9]): df[f'f{f_idx}'] = ta.rsi(df['close'], length=p)
-for p, f_idx in zip([9, 18, 27],[10, 11, 12]): df[f'f{f_idx}'] = ta.atr(df['high'], df['low'], df['close'], length=p) / df['close']
-
-# CRITICAL FIX: Align Python feature indexes with MQL5's native buffers
+for p, f_idx in zip([9, 18, 27], [10, 11, 12]): df[f'f{f_idx}'] = ta.atr(df['high'], df['low'], df['close'], length=p) / df['close']
 m = ta.macd(df['close'], 12, 26, 9)
-df['f13'] = m.iloc[:, 0] / df['close'] # MACD Line
-df['f14'] = m.iloc[:, 2] / df['close'] # Signal Line (Index 2)
-df['f15'] = m.iloc[:, 1] / df['close'] # Histogram (Index 1)
+df['f13'], df['f14'], df['f15'] = m.iloc[:, 0]/df['close'], m.iloc[:, 2]/df['close'], m.iloc[:, 1]/df['close']
 
 for p, f_idx in zip([9, 18, 27, 54, 144],[16, 17, 18, 19, 20]): df[f'f{f_idx}'] = (ta.ema(df['close'], p) - df['close']) / df['close']
 for p, f_idx in zip([9, 18, 27], [21, 22, 23]): df[f'f{f_idx}'] = ta.cci(df['high'], df['low'], df['close'], p)
@@ -68,78 +62,75 @@ for p, f_idx in zip([9, 18, 27],[30, 31, 32]):
     bb = ta.bbands(df['close'], length=p)
     df[f'f{f_idx}'] = (bb.iloc[:, 2] - bb.iloc[:, 0]) / df['close']
 
-df.replace([np.inf, -np.inf], np.nan, inplace=True)
 df.dropna(inplace=True)
 
-def label(df, tp_mult, sl_mult, h=30):
+def get_labels(df):
     c, hi, lo = df.close.values, df.high.values, df.low.values
     atr = ta.atr(df.high, df.low, df.close, length=18).values
     t = np.zeros(len(df), dtype=int)
-    for i in range(len(df)-h):
-        if np.isnan(atr[i]) or atr[i] == 0: continue
-        up, lw = c[i]+(tp_mult*atr[i]), c[i]-(sl_mult*atr[i])
-        for j in range(i+1, i+h+1):
+    for i in range(len(df)-30):
+        if np.isnan(atr[i]): continue
+        up, lw = c[i]+(2.7*atr[i]), c[i]-(0.54*atr[i])
+        for j in range(i+1, i+31):
             if hi[j] >= up: t[i] = 1; break 
             if lo[j] <= lw: t[i] = 2; break 
     return t
 
-df['target'] = label(df, 2.7, 0.54, 30)
-features =[f'f{i}' for i in range(33)]
-X, y = df[features].values, df.target.values
+df['target'] = get_labels(df)
+features = [f'f{i}' for i in range(39)]
+X, y = df[features].values, df['target'].values
 
-train_end = int(len(X) * 0.70)
+train_end = int(len(X) * 0.7)
 median = np.median(X[:train_end], axis=0)
-iqr = np.percentile(X[:train_end], 75, axis=0) - np.percentile(X[:train_end], 25, axis=0)
+iqr = np.percentile(X[:train_end], 75, axis=0) - np.percentile(X[:train_end], 25, axis=0) + 1e-8
+X_s = (X - median) / iqr
 
-X_s = (X - median) / (iqr + 1e-8)
+X_seq, y_seq = [], []
+for i in range(len(X_s)-120):
+    X_seq.append(X_s[i:i+120])
+    y_seq.append(y[i+119])
+X_seq, y_seq = np.array(X_seq), np.array(y_seq)
 
-def win(X, y):
-    xs, ys = [],[]
-    for i in range(len(X) - 120):
-        xs.append(X[i:i+120])
-        ys.append(y[i+119])
-    return np.array(xs), np.array(ys)
+# 7. TCN MODEL (RELU FOR ONNX COMPATIBILITY)
+def tcn_block(x, filters, dilation):
+    shortcut = layers.Conv1D(filters, 1, padding='same')(x)
+    # Changed 'gelu' to 'relu' to avoid Erfc operator issues in MT5
+    x = layers.Conv1D(filters, 3, padding='causal', dilation_rate=dilation, activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv1D(filters, 3, padding='causal', dilation_rate=dilation, activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    return layers.Add()([shortcut, x])
 
-X_seq, y_seq = win(X_s, y)
-X_seq_flat = X_seq.reshape(-1, 3960)
+inp = Input(shape=(4680,), name="input")
+x = layers.Reshape((120, 39))(inp)
+for d in [1, 2, 4, 8, 16]: x = tcn_block(x, 64, d)
+x = layers.GlobalAveragePooling1D()(x)
+x = layers.Dense(128, activation='relu')(x)
+x = layers.Dropout(0.3)(x)
+out = layers.Dense(3, activation='softmax', name="output")(x)
 
-# CRITICAL FIX: Architectural overhaul to prevent exploding gradients
-in_lay = tf.keras.Input(shape=(3960,), name="input") 
-rs = tf.keras.layers.Reshape((120, 33))(in_lay)
+model = Model(inp, out)
+model.compile(optimizer=tf.keras.optimizers.AdamW(1e-3), loss='sparse_categorical_crossentropy')
 
-# Must use tanh to leverage CuDNN and prevent cell-state NaN explosion
-ls = tf.keras.layers.LSTM(64, return_sequences=True, activation='tanh')(rs)
+# 8. TRAINING
+split = int(len(X_seq) * 0.85)
+X_train, X_val = X_seq[:split].reshape(-1, 4680), X_seq[split:].reshape(-1, 4680)
+y_train, y_val = y_seq[:split], y_seq[split:]
 
-# Self-attention must use Layer Normalization + Residuals
-ln1 = tf.keras.layers.LayerNormalization()(ls)
-at = tf.keras.layers.MultiHeadAttention(num_heads=4, key_dim=64)(ln1, ln1)
-res = tf.keras.layers.Add()([ls, at])
+cw = compute_class_weight('balanced', classes=np.unique(y_seq), y=y_seq)
+callbacks = [
+    EarlyStopping(monitor='val_loss', patience=12, restore_best_weights=True, verbose=1),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=1e-6, verbose=1)
+]
 
-ln2 = tf.keras.layers.LayerNormalization()(res)
-pl = tf.keras.layers.GlobalAveragePooling1D()(ln2)
-dp = tf.keras.layers.Dropout(0.3)(pl)
-ou = tf.keras.layers.Dense(3, activation='softmax')(dp)
+model.fit(X_train, y_train, validation_data=(X_val, y_val), 
+          epochs=144, batch_size=64, class_weight=dict(enumerate(cw)), callbacks=callbacks)
 
-model = tf.keras.Model(in_lay, ou)
-
-# Clipnorm prevents exploding gradients. 
-opt = tf.keras.optimizers.AdamW(learning_rate=1e-3, clipnorm=1.0)
-model.compile(optimizer=opt, loss='sparse_categorical_crossentropy')
-
-# Compute weights to fix inherent neutral-class bias
-classes = np.unique(y_seq)
-weights = compute_class_weight('balanced', classes=classes, y=y_seq)
-class_weight = {c: w for c, w in zip(classes, weights)}
-
-print("Training Network...")
-model.fit(X_seq_flat, y_seq, epochs=9, batch_size=64, class_weight=class_weight)
-
-print("Exporting model to ONNX...")
-spec = (tf.TensorSpec((None, 3960), tf.float32, name="input"),) 
+# 9. EXPORT (OPSET 13)
+spec = (tf.TensorSpec((None, 4680), tf.float32, name="input"),)
 model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec, opset=13)
+with open(OUTPUT_ONNX_MODEL, "wb") as f: f.write(model_proto.SerializeToString())
 
-with open(OUTPUT_ONNX_MODEL, "wb") as f:
-    f.write(model_proto.SerializeToString())
-
-print(f"float medians[33] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
-print(f"float iqrs[33]    = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")
+print("\n--- NEW PARAMETERS ---")
+print(f"float medians[39] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
+print(f"float iqrs[39]    = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")

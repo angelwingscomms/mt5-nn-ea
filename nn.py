@@ -8,8 +8,9 @@ import argparse
 
 # 1. SETUP & PATHS
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Change this if your file is named differently or in a different folder
-INPUT_TICK_DATA = os.path.join(SCRIPT_DIR, 'achilles_ticks.csv')
+# Load tick data from MT5 Files directory
+TICK_FILE_NAME = 'achilles_ticks.csv'
+INPUT_TICK_DATA = os.path.join(SCRIPT_DIR, '..', '..', 'Files', TICK_FILE_NAME)
 
 parser = argparse.ArgumentParser(description='Train Achilles neural network model')
 parser.add_argument('--tick-density', type=int, default=144, help='Ticks per bar')

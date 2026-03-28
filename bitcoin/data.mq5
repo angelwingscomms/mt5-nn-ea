@@ -2,28 +2,30 @@
 input int ticks_to_export = 2160000;
 
 void OnStart() {
-   ulong start_time = GetTickCount64();
-   Print("[INFO] Starting High-Throughput Tick Export...");
-   
+   Print("[INFO] Starting Microstructure Tick Export...");
    MqlTick ticks[];
-   int copied = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, ticks_to_export);
-   if(copied <= 0) { Print("❌ Failed to copy ticks."); return; }
+   // ticks_to_export is int, CopyTicks expects uint for count
+   int copied = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, (uint)ticks_to_export);
    
-   int h = FileOpen("bitcoin_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
-   if(h == INVALID_HANDLE) { Print("❌ Failed to create file."); return; }
+   if(copied <= 0) {
+      Print("❌ Error: No ticks copied. Check Symbol name and History.");
+      return;
+   }
    
-   FileWrite(h, "time_msc", "bid", "ask"); 
+   int h = FileOpen("fast/bitcoin_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   if(h == INVALID_HANDLE) return;
    
-   int valid_ticks = 0;
+   FileWrite(h, "time_msc", "bid", "ask", "vol"); 
+   
    for(int i = 0; i < copied; i++) {
-      // CRITICAL FIX: Strip corrupted server ticks with zero-pricing
       if(ticks[i].bid <= 0.0 || ticks[i].ask <= 0.0) continue;
       
-      // CRITICAL FIX: O(1) direct write bypasses string allocation overhead
-      FileWrite(h, ticks[i].time_msc, ticks[i].bid, ticks[i].ask);
-      valid_ticks++;
+      // FIX: Use .volume instead of .tick_volume. 
+      // Add fallback to 1.0 if volume is not provided by broker.
+      double v = (ticks[i].volume > 0) ? (double)ticks[i].volume : 1.0;
+      
+      FileWrite(h, ticks[i].time_msc, ticks[i].bid, ticks[i].ask, v);
    }
    FileClose(h);
-   
-   PrintFormat("✅ Exported %d valid ticks in %.2f seconds.", valid_ticks, (GetTickCount64()-start_time)/1000.0);
+   PrintFormat("✅ Exported %d ticks with Micro-Volume data.", copied);
 }
