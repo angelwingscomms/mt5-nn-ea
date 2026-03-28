@@ -24,13 +24,14 @@ void OnStart() {
       if(copied <= 0) break;
       last_time = ticks[copied-1].time_msc + 1; 
       
+      int valid_in_chunk = 0;
       for(int i = 0; i < copied; i++) {
          if(ticks[i].bid <= 0.0 || ticks[i].ask < ticks[i].bid) continue;
-         // Ensure volume is at least 0.01 to prevent math errors downstream
          double v = (ticks[i].volume > 0) ? (double)ticks[i].volume : 0.01;
          FileWrite(h, ticks[i].time_msc, ticks[i].bid, ticks[i].ask, v);
+         valid_in_chunk++;
       }
-      total_copied += copied;
+      total_copied += valid_in_chunk;
       if(last_time >= (ulong)TimeCurrent() * 1000ull) break;
    }
    FileClose(h);
@@ -65,7 +66,7 @@ df = df_t.groupby('bar_id').agg({'bid':['first','max','min','last'], 'vol':'sum'
 df.columns = ['open','high','low','close','volume','time_open']
 df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask']-x['bid']).mean()).values
 
-def get_symmetric_labels(df, tp_mult=2.7, sl_mult=0.54):
+def get_symmetric_labels(df, tp_mult=27, sl_mult=5.4):
     c, hi, lo = df.close.values, df.high.values, df.low.values
     atr = ta.atr(df.high, df.low, df.close, length=18).values
     labels = np.zeros(len(df), dtype=int)
@@ -75,14 +76,19 @@ def get_symmetric_labels(df, tp_mult=2.7, sl_mult=0.54):
         s_tp, s_sl = c[i] - (tp_mult*atr[i]), c[i] + (sl_mult*atr[i])
 
         buy_done, sell_done = False, False
+        buy_won,  sell_won  = False, False
         for j in range(i+1, i+TARGET_HORIZON):
             if not buy_done:
-                if hi[j] >= b_tp: labels[i] = 1; buy_done = True
-                elif lo[j] <= b_sl: buy_done = True
+                if   hi[j] >= b_tp: buy_won  = True;  buy_done  = True
+                elif lo[j] <= b_sl:                    buy_done  = True
             if not sell_done:
-                if lo[j] <= s_tp: labels[i] = 2; sell_done = True
-                elif hi[j] >= s_sl: sell_done = True
+                if   lo[j] <= s_tp: sell_won = True;  sell_done = True
+                elif hi[j] >= s_sl:                    sell_done = True
             if buy_done and sell_done: break
+
+        if   buy_won and not sell_won: labels[i] = 1
+        elif sell_won and not buy_won: labels[i] = 2
+        # both or neither → stays 0 (neutral), which is the correct safe label
     return labels
 
 # 2. FEATURE ENGINEERING (17 FEATURES)
@@ -114,8 +120,9 @@ y = df['target'].values
 # 3. ROBUST SCALING
 raw_split = int(len(X) * 0.9)
 split = raw_split - SEQ_LEN
-median = np.median(X[:split], axis=0)
-iqr = np.percentile(X[:split], 75, axis=0) - np.percentile(X[:split], 25, axis=0)
+# Fit scaler on ALL training rows, not the sequence-adjusted subset
+median = np.median(X[:raw_split], axis=0)
+iqr = np.percentile(X[:raw_split], 75, axis=0) - np.percentile(X[:raw_split], 25, axis=0)
 iqr = np.where(iqr < 1e-6, 1.0, iqr)
 X_s = np.clip((X - median) / iqr, -10, 10)
 
@@ -161,7 +168,7 @@ model.compile(optimizer=tf.keras.optimizers.AdamW(1e-3), loss='sparse_categorica
 
 # Train with Class Weights
 from sklearn.utils.class_weight import compute_class_weight
-cw = compute_class_weight('balanced', classes=np.unique(y_seq[:split]), y=y_seq[:split])
+cw = compute_class_weight('balanced', classes=np.array([0, 1, 2]), y=y_seq[:split])
 assert split > 0 and split < len(X_seq), f"Split {split} out of range for X_seq len {len(X_seq)}"
 model.fit(X_seq[:split].reshape(-1, 2040), y_seq[:split], 
           validation_data=(X_seq[split:].reshape(-1, 2040), y_seq[split:]),
@@ -202,10 +209,19 @@ float output_data[3];
 
 int OnInit() {
    onnx_handle = OnnxCreateFromBuffer(model_buffer, ONNX_DEFAULT);
+   if(onnx_handle == INVALID_HANDLE) {
+      Print("[FATAL] OnnxCreateFromBuffer failed: ", GetLastError());
+      return(INIT_FAILED);
+   }
    const long in_shape[] = {1, 2040};
    const long out_shape[] = {1, 3};
-   OnnxSetInputShape(onnx_handle, 0, in_shape);
-   OnnxSetOutputShape(onnx_handle, 0, out_shape);
+   if(!OnnxSetInputShape(onnx_handle, 0, in_shape) ||
+      !OnnxSetOutputShape(onnx_handle, 0, out_shape)) {
+      Print("[FATAL] OnnxSetShape failed: ", GetLastError());
+      OnnxRelease(onnx_handle);
+      onnx_handle = INVALID_HANDLE;
+      return(INIT_FAILED);
+   }
    return(INIT_SUCCEEDED);
 }
 
@@ -231,17 +247,36 @@ void OnTick() {
       for(int i=199; i>0; i--) history[i] = history[i-1];
       history[0] = cur_b;
       ticks_in_bar = 0;
-      if(history[149].c > 0) Predict();
+      if(history[120].c > 0) Predict();  // h goes up to 119; h+1 = 120 is the deepest access
    }
 }
 
+// Add to Bar struct: int bar_count;  (initialise to 0 in OnInit / cold-start branch)
+// Requires a small ring buffer for TR accumulation – shown inline below.
+
+static double tr_buf[18];
+static int    tr_buf_n = 0;
+
 void UpdateIndicators(Bar &b) {
    Bar p = history[0];
-   if(p.c <= 0) { // EMA COLD START FIX
-      b.macd_ema12 = b.c; b.macd_ema26 = b.c; b.macd_sig = 0; b.atr18 = b.h-b.l; return;
+   if(p.c <= 0) {
+      b.macd_ema12 = b.c; b.macd_ema26 = b.c; b.macd_sig = 0;
+      double tr0 = b.h - b.l;
+      tr_buf[0] = tr0; tr_buf_n = 1;
+      b.atr18 = tr0;   // will be replaced once 18 TRs are collected
+      return;
    }
    double tr = MathMax(b.h-b.l, MathMax(MathAbs(b.h-p.c), MathAbs(b.l-p.c)));
-   b.atr18 = (tr - p.atr18)/18.0 + p.atr18;
+   if(tr_buf_n < 18) {
+      tr_buf[tr_buf_n++] = tr;
+      // Seed phase: use plain SMA, matching pandas_ta initialisation
+      double sum = 0;
+      for(int k = 0; k < tr_buf_n; k++) sum += tr_buf[k];
+      b.atr18 = sum / tr_buf_n;
+   } else {
+      // Wilder smoothing — identical to pandas_ta after the seed window
+      b.atr18 = (tr - p.atr18) / 18.0 + p.atr18;
+   }
    b.macd_ema12 = (b.c - p.macd_ema12)*(2.0/13.0) + p.macd_ema12;
    b.macd_ema26 = (b.c - p.macd_ema26)*(2.0/27.0) + p.macd_ema26;
    double macd_raw = b.macd_ema12 - b.macd_ema26;

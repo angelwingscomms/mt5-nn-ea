@@ -23,7 +23,7 @@ df = df_t.groupby('bar_id').agg({'bid':['first','max','min','last'], 'vol':'sum'
 df.columns = ['open','high','low','close','volume','time_open']
 df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask']-x['bid']).mean()).values
 
-def get_symmetric_labels(df, tp_mult=2.7, sl_mult=0.54):
+def get_symmetric_labels(df, tp_mult=27, sl_mult=5.4):
     c, hi, lo = df.close.values, df.high.values, df.low.values
     atr = ta.atr(df.high, df.low, df.close, length=18).values
     labels = np.zeros(len(df), dtype=int)
@@ -129,7 +129,7 @@ cw = compute_class_weight('balanced', classes=np.array([0, 1, 2]), y=y_seq[:spli
 assert split > 0 and split < len(X_seq), f"Split {split} out of range for X_seq len {len(X_seq)}"
 model.fit(X_seq[:split].reshape(-1, 2040), y_seq[:split], 
           validation_data=(X_seq[split:].reshape(-1, 2040), y_seq[split:]),
-          epochs=100, batch_size=64, class_weight=dict(enumerate(cw)),
+          epochs=1, batch_size=64, class_weight=dict(enumerate(cw)),
           callbacks=[tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)])
 
 # Export
@@ -137,5 +137,6 @@ spec = (tf.TensorSpec((1, 2040), tf.float32, name="input"),)
 model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec, opset=13)
 with open("bitcoin_144.onnx", "wb") as f: f.write(model_proto.SerializeToString())
 
-print(f"Medians: {list(median)}")
-print(f"IQRs: {list(iqr)}")
+print("\n--- PASTE THESE INTO live.mq5 ---")
+print(f"float medians[35] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
+print(f"float iqrs[35] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")

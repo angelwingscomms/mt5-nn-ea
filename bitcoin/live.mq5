@@ -2,6 +2,8 @@
 #resource "\\Experts\\nn\\bitcoin_144.onnx" as uchar model_buffer[]
 
 input int TICK_DENSITY = 144;
+input double SL_MULTIPLIER = 5.4;
+input double TP_MULTIPLIER = 27.0;
 long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
@@ -135,8 +137,8 @@ void Predict() {
 void Execute(int sig) {
    if(PositionSelect(_Symbol)) return;
    double p   = (sig==1) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double sl  = (sig==1) ? (p - history[0].atr18*0.54) : (p + history[0].atr18*0.54);
-   double tp  = (sig==1) ? (p + history[0].atr18*2.7)  : (p - history[0].atr18*2.7);
+   double sl  = (sig==1) ? (p - history[0].atr18*SL_MULTIPLIER) : (p + history[0].atr18*SL_MULTIPLIER);
+   double tp  = (sig==1) ? (p + history[0].atr18*TP_MULTIPLIER)  : (p - history[0].atr18*TP_MULTIPLIER);
    
    // NEW: validate stops are non-degenerate
    double min_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
