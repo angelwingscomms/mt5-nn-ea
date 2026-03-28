@@ -3,6 +3,7 @@
 Combines data.mq5, nn.py, and live.mq5 into a single pipeline.md file.
 Each file is wrapped in a code block with appropriate language tagging.
 Use -i flag to also include FLAWS.md.
+Use -r flag to specify a subfolder (e.g., -r bitcoin).
 """
 
 import argparse
@@ -39,10 +40,24 @@ def main():
     parser = argparse.ArgumentParser(description='Combine files into pipeline.md')
     parser.add_argument('-i', '--include-flaws', action='store_true',
                         help='Include FLAWS.md in the output')
+    parser.add_argument('-r', '--root', type=str, default=None,
+                        help='Specify subfolder to read files from (e.g., bitcoin)')
     args = parser.parse_args()
     
     # Get the directory this script is in
     script_dir = Path(__file__).parent.resolve()
+    
+    # Determine the source directory
+    if args.root:
+        source_dir = script_dir / args.root
+        if not source_dir.exists():
+            print(f"Error: Folder '{args.root}' does not exist")
+            return
+        if not source_dir.is_dir():
+            print(f"Error: '{args.root}' is not a directory")
+            return
+    else:
+        source_dir = script_dir
     
     # Only include these specific files
     include_files = ['data.mq5', 'nn.py', 'live.mq5']
@@ -52,7 +67,7 @@ def main():
         include_files.append('FLAWS.md')
     
     # Get the specified files
-    files = [script_dir / name for name in include_files if (script_dir / name).exists()]
+    files = [source_dir / name for name in include_files if (source_dir / name).exists()]
     
     # Build the pipeline.md content
     output_lines = []
@@ -74,13 +89,13 @@ def main():
         output_lines.append("```")
         output_lines.append("")  # Empty line between files
     
-    # Write pipeline.md
-    output_path = script_dir / 'pipeline.md'
+    # Write pipeline.md to the source directory
+    output_path = source_dir / 'pipeline.md'
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write('\n'.join(output_lines))
     
-    print(f"\n✅ Created {output_path}")
-    print(f"   Combined {len(files)} file(s)")
+    print(f"\nCreated {output_path}")
+    print(f"Combined {len(files)} file(s)")
 
 if __name__ == '__main__':
     main()

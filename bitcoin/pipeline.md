@@ -1,11 +1,9 @@
 data.mq5
 ```cpp
 #property script_show_inputs // Show settings window
-input int ticks_to_export = 2160000; // Total ticks (~5 days of Gold)
-input string USDX_Symbol = "$USDX"; // Name of USD Index
-input string USDJPY_Symbol = "USDJPY"; // Name of USDJPY
+input int ticks_to_export = 2160000; // Total ticks (~5 days of Bitcoin)
 
-// FLAW 4.4 FIX: Optimized tick data exporting with StringFormat and Two-Pointer Merge
+// Bitcoin Tick Data Exporter - Exports only Bitcoin prices with datetime
 
 //+------------------------------------------------------------------+
 //| Logging helper functions                                          |
@@ -41,35 +39,16 @@ void LogSeparator() {
 void OnStart() {
    ulong start_time = GetTickCount64(); // Script start timestamp
    LogSeparator();
-   LogInfo("ACHILLES TICK DATA EXPORTER - Starting execution");
+   LogInfo("BITCOIN TICK DATA EXPORTER - Starting execution");
    LogSeparator();
-   LogInfo(StringFormat("Parameters: ticks_to_export=%d, USDX='%s', USDJPY='%s'", 
-                        ticks_to_export, USDX_Symbol, USDJPY_Symbol));
+   LogInfo(StringFormat("Parameters: ticks_to_export=%d", ticks_to_export));
    LogInfo(StringFormat("Main symbol: %s", _Symbol));
    
-   MqlTick ticks[], usdx_ticks[], usdjpy_ticks[]; // Arrays to hold tick data
-   
-   // === SYMBOL SELECTION PHASE ===
-   LogInfo("Phase 1: Symbol Selection");
-   LogInfo(StringFormat("  Attempting to select USDX symbol: '%s'", USDX_Symbol));
-   bool usdx_available = SymbolSelect(USDX_Symbol, true);
-   if(usdx_available) {
-      LogSuccess(StringFormat("  USDX symbol '%s' selected successfully", USDX_Symbol));
-   } else {
-      LogWarning(StringFormat("  USDX symbol '%s' NOT available - will use placeholder (0.0)", USDX_Symbol));
-   }
-   
-   LogInfo(StringFormat("  Attempting to select USDJPY symbol: '%s'", USDJPY_Symbol));
-   bool usdjpy_available = SymbolSelect(USDJPY_Symbol, true);
-   if(usdjpy_available) {
-      LogSuccess(StringFormat("  USDJPY symbol '%s' selected successfully", USDJPY_Symbol));
-   } else {
-      LogWarning(StringFormat("  USDJPY symbol '%s' NOT available - will use placeholder (0.0)", USDJPY_Symbol));
-   }
+   MqlTick ticks[]; // Array to hold tick data
    
    // === TICK DATA COPYING PHASE ===
    LogSeparator();
-   LogInfo("Phase 2: Tick Data Acquisition");
+   LogInfo("Phase 1: Tick Data Acquisition");
    LogInfo(StringFormat("  Copying %d ticks for main symbol '%s'...", ticks_to_export, _Symbol));
    
    ulong copy_start = GetTickCount64();
@@ -92,44 +71,13 @@ void OnStart() {
                            TimeToString(last_time, TIME_DATE|TIME_MINUTES|TIME_SECONDS)));
    }
    
-   // Get tick data for auxiliary symbols if available
-   int usdx_copied = 0, usdjpy_copied = 0;
-   
-   if(usdx_available) {
-      LogInfo(StringFormat("  Copying %d ticks for USDX '%s'...", ticks_to_export, USDX_Symbol));
-      copy_start = GetTickCount64();
-      usdx_copied = CopyTicks(USDX_Symbol, usdx_ticks, COPY_TICKS_ALL, 0, ticks_to_export);
-      copy_time = GetTickCount64() - copy_start;
-      
-      if(usdx_copied <= 0) {
-         LogWarning(StringFormat("  USDX ticks not available (error: %d), using placeholder", GetLastError()));
-         usdx_available = false;
-      } else {
-         LogSuccess(StringFormat("  Copied %d USDX ticks in %llu ms", usdx_copied, copy_time));
-      }
-   }
-   
-   if(usdjpy_available) {
-      LogInfo(StringFormat("  Copying %d ticks for USDJPY '%s'...", ticks_to_export, USDJPY_Symbol));
-      copy_start = GetTickCount64();
-      usdjpy_copied = CopyTicks(USDJPY_Symbol, usdjpy_ticks, COPY_TICKS_ALL, 0, ticks_to_export);
-      copy_time = GetTickCount64() - copy_start;
-      
-      if(usdjpy_copied <= 0) {
-         LogWarning(StringFormat("  USDJPY ticks not available (error: %d), using placeholder", GetLastError()));
-         usdjpy_available = false;
-      } else {
-         LogSuccess(StringFormat("  Copied %d USDJPY ticks in %llu ms", usdjpy_copied, copy_time));
-      }
-   }
-   
     // === FILE CREATION PHASE ===
     LogSeparator();
-    LogInfo("Phase 3: File Creation");
-    LogInfo("  Creating output file: fast/achilles_ticks.csv");
+    LogInfo("Phase 2: File Creation");
+    LogInfo("  Creating output file: fast/bitcoin_ticks.csv");
     LogInfo("  (MQL5 sandbox restricts to MQL5\\Files, run move_ticks.py after export)");
     
-    int h = FileOpen("fast/achilles_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+    int h = FileOpen("fast/bitcoin_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
    if(h == INVALID_HANDLE) {
       LogError(StringFormat("  Failed to create file! Error code: %d", GetLastError()));
       LogError("  Script terminated - cannot write data");
@@ -137,62 +85,31 @@ void OnStart() {
    }
    LogSuccess("  File opened successfully");
    
-   FileWrite(h, "time_msc,bid,ask,usdx,usdjpy"); // Write CSV header
-   LogInfo("  CSV header written: time_msc,bid,ask,usdx,usdjpy");
+   FileWrite(h, "time_msc,bid,ask"); // Write CSV header (Bitcoin only, no USDX/USDJPY)
+   LogInfo("  CSV header written: time_msc,bid,ask");
    
    // === DATA PROCESSING PHASE ===
    LogSeparator();
-   LogInfo("Phase 4: Data Processing & Export");
-   LogInfo(StringFormat("  Processing %d ticks with Two-Pointer Merge algorithm...", copied));
-   LogInfo("  Algorithm complexity: O(N) - linear time");
+   LogInfo("Phase 3: Data Processing & Export");
+   LogInfo(StringFormat("  Processing %d ticks...", copied));
    
-   // FLAW 4.4 FIX: Two-Pointer Merge algorithm for O(N) timestamp alignment
-   int usdx_idx = 0, usdjpy_idx = 0; // Indices for auxiliary tick arrays
-   double usdx_bid = 0.0, usdjpy_bid = 0.0; // Current matched prices
-   
-   int usdx_matches = 0, usdjpy_matches = 0; // Count of successful matches
    int progress_interval = copied / 10; // Report progress every 10%
    if(progress_interval < 1000) progress_interval = 1000; // Minimum 1000 ticks between reports
    
    ulong process_start = GetTickCount64();
    
    for(int i = 0; i < copied; i++) {
-      ulong t = ticks[i].time_msc; // Current tick timestamp
-      
-      // FLAW 4.4 FIX: Two-Pointer Merge for USDX
-      if(usdx_available && usdx_copied > 0) {
-         int prev_idx = usdx_idx;
-         while(usdx_idx < usdx_copied - 1 && usdx_ticks[usdx_idx + 1].time_msc <= t) {
-            usdx_idx++;
-         }
-         if(usdx_idx != prev_idx) usdx_matches++;
-         usdx_bid = usdx_ticks[usdx_idx].bid;
-      }
-      
-      // FLAW 4.4 FIX: Two-Pointer Merge for USDJPY
-      if(usdjpy_available && usdjpy_copied > 0) {
-         int prev_idx = usdjpy_idx;
-         while(usdjpy_idx < usdjpy_copied - 1 && usdjpy_ticks[usdjpy_idx + 1].time_msc <= t) {
-            usdjpy_idx++;
-         }
-         if(usdjpy_idx != prev_idx) usdjpy_matches++;
-         usdjpy_bid = usdjpy_ticks[usdjpy_idx].bid;
-      }
-      
       // Use StringFormat for efficient string building
-      string row = StringFormat("%lld,%.5f,%.5f,%.5f,%.5f",
+      string row = StringFormat("%lld,%.2f,%.2f",
                                 ticks[i].time_msc,
                                 ticks[i].bid,
-                                ticks[i].ask,
-                                usdx_bid,
-                                usdjpy_bid);
+                                ticks[i].ask);
       FileWrite(h, row);
       
       // Progress reporting
       if(progress_interval > 0 && (i + 1) % progress_interval == 0) {
          int percent = (int)((double)(i + 1) / copied * 100);
          ulong elapsed = GetTickCount64() - process_start;
-         int estimated_total = (int)((double)elapsed / (i + 1) * copied / 1000);
          int estimated_remaining = (int)((double)elapsed / (i + 1) * (copied - i - 1) / 1000);
          LogProgress("Export", i + 1, copied, 
                      StringFormat(" | Elapsed: %ds | ETA: %ds", 
@@ -204,12 +121,12 @@ void OnStart() {
    
    // === FILE FINALIZATION PHASE ===
    LogSeparator();
-   LogInfo("Phase 5: File Finalization");
+   LogInfo("Phase 4: File Finalization");
    FileClose(h);
    LogSuccess("  File closed successfully");
    
    // Calculate file size estimate (approximate)
-   long file_size_estimate = copied * 60L; // ~60 bytes per row estimate
+   long file_size_estimate = copied * 30L; // ~30 bytes per row estimate (Bitcoin only)
    LogInfo(StringFormat("  Estimated file size: ~%.2f MB", (double)file_size_estimate / 1024 / 1024));
    
    // === FINAL SUMMARY ===
@@ -219,23 +136,9 @@ void OnStart() {
    
    ulong total_time = GetTickCount64() - start_time;
    
-    LogSuccess(StringFormat("Exported %d ticks to fast/achilles_ticks.csv", copied));
+    LogSuccess(StringFormat("Exported %d ticks to fast/bitcoin_ticks.csv", copied));
     LogInfo("  Run 'python fast/move_ticks.py' to move file to project directory");
     LogInfo(StringFormat("  Main symbol (%s): %d ticks", _Symbol, copied));
-   
-   if(usdx_available) {
-      LogInfo(StringFormat("  USDX (%s): %d ticks loaded, %d timestamp matches", 
-                           USDX_Symbol, usdx_copied, usdx_matches));
-   } else {
-      LogInfo("  USDX: Not available (used placeholder 0.0)");
-   }
-   
-   if(usdjpy_available) {
-      LogInfo(StringFormat("  USDJPY (%s): %d ticks loaded, %d timestamp matches", 
-                           USDJPY_Symbol, usdjpy_copied, usdjpy_matches));
-   } else {
-      LogInfo("  USDJPY: Not available (used placeholder 0.0)");
-   }
    
    LogInfo(StringFormat("Processing time: %llu ms (%.2f seconds)", process_time, (double)process_time / 1000));
    LogInfo(StringFormat("Throughput: %.0f ticks/second", (double)copied / (process_time / 1000.0)));
@@ -260,14 +163,14 @@ import argparse
 # 1. SETUP & PATHS
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Change this if your file is named differently or in a different folder
-INPUT_TICK_DATA = os.path.join(SCRIPT_DIR, 'achilles_ticks.csv')
+INPUT_TICK_DATA = os.path.join(SCRIPT_DIR, 'bitcoin_ticks.csv')
 
-parser = argparse.ArgumentParser(description='Train Achilles neural network model')
+parser = argparse.ArgumentParser(description='Train Bitcoin neural network model')
 parser.add_argument('--tick-density', type=int, default=144, help='Ticks per bar')
 args = parser.parse_args()
 
 TICK_DENSITY = args.tick_density
-OUTPUT_ONNX_MODEL = os.path.join(SCRIPT_DIR, f'achilles_{TICK_DENSITY}.onnx') 
+OUTPUT_ONNX_MODEL = os.path.join(SCRIPT_DIR, f'bitcoin_{TICK_DENSITY}.onnx') 
 
 if not os.path.exists(INPUT_TICK_DATA):
     print(f"Error: {INPUT_TICK_DATA} not found. Ensure you exported data from MT5 first.")
@@ -287,9 +190,6 @@ agg_dict = {
     'spread_tick': 'mean'
 }
 
-if 'usdx' in df_t.columns: agg_dict['usdx'] = 'last'
-if 'usdjpy' in df_t.columns: agg_dict['usdjpy'] = 'last'
-
 df_agg = df_t.groupby('bar_id').agg(agg_dict)
 df = pd.DataFrame({
     'open': df_agg[('bid', 'first')].values,
@@ -302,12 +202,10 @@ df = pd.DataFrame({
 })
 
 df['duration'] = df['time_close'] - df['time_open']
-df['usdx'] = df_agg[('usdx', 'last')].values if 'usdx' in df_t.columns else df['close']
-df['usdjpy'] = df_agg[('usdjpy', 'last')].values if 'usdjpy' in df_t.columns else df['close']
 df.dropna(inplace=True)
 
-# 3. FEATURE ENGINEERING (Parity with MQL5 Built-ins)
-print("Building 35 Features...")
+# 3. FEATURE ENGINEERING (Bitcoin-specific - 33 features, no USDX/USDJPY)
+print("Building 33 Features...")
 # Returns & Spreads
 df['f0'] = np.log(df['close'] / df['close'].shift(1))
 df['f1'] = df['spread']
@@ -348,11 +246,8 @@ df['f26'] = ta.willr(df['high'], df['low'], df['close'], 27)
 df['f27'] = df['close'].diff(9) / df['close']
 df['f28'] = df['close'].diff(18) / df['close']
 df['f29'] = df['close'].diff(27) / df['close']
-# Correlations
-df['f30'] = df['usdx'].pct_change()
-df['f31'] = df['usdjpy'].pct_change()
-# Bollinger Band Width
-for p, f_idx in zip([9, 18, 27], [32, 33, 34]):
+# Bollinger Band Width (f30, f31, f32 instead of f32, f33, f34)
+for p, f_idx in zip([9, 18, 27], [30, 31, 32]):
     bb = ta.bbands(df['close'], length=p)
     df[f'f{f_idx}'] = (bb.iloc[:, 2] - bb.iloc[:, 0]) / df['close']
 
@@ -374,7 +269,7 @@ def label(df, tp_mult, sl_mult, h):
     return t
 
 df['target'] = label(df, TP_MULTIPLIER, SL_MULTIPLIER, H)
-features =[f'f{i}' for i in range(35)]
+features =[f'f{i}' for i in range(33)] # Bitcoin has 33 features
 X, y = df[features].values, df.target.values
 
 # 5. SPLIT & SCALE
@@ -394,11 +289,11 @@ X_s = (X - median) / (iqr + 1e-8)
 X_seq, y_seq = win(X_s, y)
 
 # --- UPDATE SECTION 6: MODEL ---
-# New Input: 4200 flat numbers (120 bars * 35 features)
-in_lay = tf.keras.Input(shape=(4200,), name="input") 
+# New Input: 3960 flat numbers (120 bars * 33 features)
+in_lay = tf.keras.Input(shape=(3960,), name="input") 
 
-# Internally reshape to what LSTM needs: (Batch=1, Timesteps=120, Features=35)
-rs = tf.keras.layers.Reshape((120, 35))(in_lay)
+# Internally reshape to what LSTM needs: (Batch=1, Timesteps=120, Features=33)
+rs = tf.keras.layers.Reshape((120, 33))(in_lay)
 
 ls = tf.keras.layers.LSTM(64, return_sequences=True, activation='mish')(rs)
 at = tf.keras.layers.MultiHeadAttention(num_heads=4, key_dim=64)(ls, ls)
@@ -408,47 +303,44 @@ model = tf.keras.Model(in_lay, ou)
 model.compile(optimizer='adamw', loss='sparse_categorical_crossentropy')
 
 # Flatten the training data to match the new input shape
-X_seq_flat = X_seq.reshape(-1, 4200)
+X_seq_flat = X_seq.reshape(-1, 3960)
 
 print("Training...")
-model.fit(X_seq_flat, y_seq, epochs=10, batch_size=64)
+model.fit(X_seq_flat, y_seq, epochs=54, batch_size=64)
 
 # 7. EXPORT TO ONNX (FLAT SHAPE)
 print("Exporting model to ONNX...")
-# Input is now just a flat vector of 4200
-spec = (tf.TensorSpec((None, 4200), tf.float32, name="input"),) 
+# Input is now just a flat vector of 3960
+spec = (tf.TensorSpec((None, 3960), tf.float32, name="input"),) 
 model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec, opset=13)
 
 with open(OUTPUT_ONNX_MODEL, "wb") as f:
     f.write(model_proto.SerializeToString())
 
 print("\n--- PASTE THESE INTO live.mq5 ---")
-print(f"float medians[35] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
-print(f"float iqrs[35] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")
+print(f"float medians[33] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
+print(f"float iqrs[33]    = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")
 ```
 
 live.mq5
 ```cpp
-﻿//+------------------------------------------------------------------+
-//|                                              Live_Achilles.mq5   |
-//|                                  Copyright 2026, Achilles Algo   |
+//+------------------------------------------------------------------+
+//|                                              Live_Bitcoin.mq5     |
+//|                                  Copyright 2026, Bitcoin Algo     |
 //+------------------------------------------------------------------+
 #include <Trade\Trade.mqh>
 
 // 1. RESOURCE & INPUTS
-#resource "\\Experts\\nn\\achilles_144.onnx" as uchar model_buffer[]
+#resource "\\Experts\\nn\\bitcoin\\bitcoin_144.onnx" as uchar model_buffer[]
 
 input int    TICK_DENSITY  = 144;      
 input double TP_MULTIPLIER = 2.7;      
 input double SL_MULTIPLIER = 0.54;     
-input string USDX_Symbol   = "$USDX";  
-input string USDJPY_Symbol = "USDJPY"; 
 input int    MAGIC_NUMBER  = 144144;   
 
 // --- SCALING PARAMETERS ---
-// PASTE THE OUTPUT FROM YOUR PYTHON SCRIPT HERE
-float medians[35] = {-0.000006f, 0.104931f, 30150.0f, 0.000127f, 0.000132f, 0.000805f, 0.503401f, 49.824540f, 49.608665f, 49.568888f, 0.000869f, 0.000876f, 0.000880f, -0.000016f, -0.000016f, -0.000000f, 0.000017f, 0.000014f, 0.000043f, 0.000105f, 0.000096f, -126020.69f, -83237.61f, -65911.13f, -49.7117f, -49.7000f, -48.6915f, -0.000023f, -0.000085f, -0.000105f, 0.000000f, 0.000000f, 0.002801f, 0.003922f, 0.004775f};
-float iqrs[35]    = {0.000780f, 0.022743f, 5272.5f, 0.000250f, 0.000255f, 0.000658f, 0.663998f, 21.478885f, 14.504269f, 11.509027f, 0.000528f, 0.000507f, 0.000490f, 0.000749f, 0.000683f, 0.000274f, 0.001109f, 0.001674f, 0.002106f, 0.002950f, 0.005309f, 124022.83f, 75234.65f, 57520.73f, 59.110822f, 57.496001f, 56.672005f, 0.002549f, 0.003638f, 0.004620f, 0.000101f, 0.000113f, 0.002482f, 0.003295f, 0.004007f};
+float medians[33] = {0.00000000f, 27.00000000f, 87.84800000f, 0.00023141f, 0.00023753f, 0.00111235f, 0.50282486f, 50.13602989f, 49.94441432f, 49.98808796f, 0.00118962f, 0.00119550f, 0.00120811f, 0.00000008f, -0.00000390f, 0.00000120f, 0.00000691f, -0.00001362f, -0.00001406f, -0.00000063f, -0.00009099f, -39707.45091325f, -3792.52098882f, 11195.23451692f, -50.34965035f, -50.51903114f, -50.12285012f, -0.00002158f, 0.00000000f, -0.00002834f, 0.00332237f, 0.00459211f, 0.00563987f};
+float iqrs[33]    = {0.00098212f, 0.14583333f, 47.63700000f, 0.00034076f, 0.00035548f, 0.00069236f, 0.56733877f, 20.22841795f, 13.83736542f, 11.20782633f, 0.00041950f, 0.00039227f, 0.00037959f, 0.00116635f, 0.00035128f, 0.00110528f, 0.00129523f, 0.00194593f, 0.00244929f, 0.00356923f, 0.00599302f, 92187.79394857f, 55475.79980033f, 44018.00685251f, 53.81116849f, 53.12096968f, 52.74723642f, 0.00303838f, 0.00435999f, 0.00543748f, 0.00247653f, 0.00321723f, 0.00389436f};
 
 // --- GLOBAL HANDLES ---
 int hRSI9, hRSI18, hRSI27, hATR9, hATR18, hATR27, hMACD, hEMA9, hEMA18, hEMA27, hEMA54, hEMA144, hCCI9, hCCI18, hCCI27, hWPR9, hWPR18, hWPR27, hBB9, hBB18, hBB27;
@@ -456,12 +348,12 @@ long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
 // --- ONNX DATA BUFFERS ---
-float input_data[4200]; // 1 * 120 * 35 = 4200
+float input_data[3960]; // 1 * 120 * 33 = 3960 (Bitcoin has 33 features, not 35)
 float output_data[3];   // Softmax: [Neutral, Buy, Sell]
 
 // --- TICK BAR STORAGE ---
 struct Bar {
-   double o, h, l, c, spread, usdx, jpy;
+   double o, h, l, c, spread;
    long time_start;
 };
 Bar history[150]; // History buffer for returns and momentum
@@ -472,19 +364,14 @@ Bar current_bar;
 //| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   if(!SymbolSelect(USDX_Symbol, true) || !SymbolSelect(USDJPY_Symbol, true)) {
-      Print("❌ Missing Symbols: ", USDX_Symbol, " or ", USDJPY_Symbol);
-      return(INIT_FAILED);
-   }
-   
    onnx_handle = OnnxCreateFromBuffer(model_buffer, ONNX_DEFAULT);
    if(onnx_handle == INVALID_HANDLE) {
       Print("❌ ONNX Handle Error: ", GetLastError());
       return(INIT_FAILED);
    }
 
-   // --- SET FLAT SHAPES (1, 4200) ---
-   const long in_shape[] = {1, 4200};
+   // --- SET FLAT SHAPES (1, 3960) ---
+   const long in_shape[] = {1, 3960};
    const long out_shape[] = {1, 3};
    
    if(!OnnxSetInputShape(onnx_handle, 0, in_shape) && GetLastError() != 5805) return(INIT_FAILED);
@@ -514,7 +401,7 @@ int OnInit() {
    hBB27 = iBands(_Symbol, PERIOD_CURRENT, 27, 0, 2.0, PRICE_CLOSE);
 
    trade.SetExpertMagicNumber(MAGIC_NUMBER);
-   Print("✅ Achilles Online. Flat-Tensor Model Loaded.");
+   Print("✅ Bitcoin Online. Flat-Tensor Model Loaded.");
    return(INIT_SUCCEEDED);
 }
 
@@ -537,8 +424,6 @@ void OnTick() {
 
    if(ticks_in_bar >= TICK_DENSITY) {
       current_bar.spread /= (double)TICK_DENSITY;
-      current_bar.usdx = SymbolInfoDouble(USDX_Symbol, SYMBOL_BID);
-      current_bar.jpy = SymbolInfoDouble(USDJPY_Symbol, SYMBOL_BID);
       
       // Shift and save history
       for(int i=149; i>0; i--) history[i] = history[i-1];
@@ -571,15 +456,12 @@ void Predict() {
    CopyBuffer(hBB18,1,0,120,b18u); CopyBuffer(hBB18,2,0,120,b18l);
    CopyBuffer(hBB27,1,0,120,b27u); CopyBuffer(hBB27,2,0,120,b27l);
 
-   // Populate the flat 4200 array
+   // Populate the flat 3960 array (33 features * 120 bars)
    for(int i=0; i<120; i++) {
       int h_idx = 119 - i; // Older bars first [119 ... 0]
-      int ind = i;         // Index in indicator buffer (where 0 is newest)
-      // Note: pandas_ta calculates newest at the bottom of the dataframe. 
-      // We fill the 120-window such that i=0 is oldest and i=119 is newest bar.
       int buf_idx = 119 - i; // Index in copied indicator buffers corresponding to h_idx
       
-      float f[35];
+      float f[33]; // Bitcoin has 33 features (no USDX/USDJPY)
       double close = history[h_idx].c;
       
       f[0] = (float)MathLog(close / (history[h_idx+1].c + 1e-8));
@@ -599,14 +481,13 @@ void Predict() {
       f[27] = (float)((close - history[h_idx+9].c) / close);
       f[28] = (float)((close - history[h_idx+18].c) / close);
       f[29] = (float)((close - history[h_idx+27].c) / close);
-      f[30] = (float)((history[h_idx].usdx - history[h_idx+1].usdx) / (history[h_idx+1].usdx + 1e-8));
-      f[31] = (float)((history[h_idx].jpy - history[h_idx+1].jpy) / (history[h_idx+1].jpy + 1e-8));
-      f[32] = (float)((b9u[buf_idx] - b9l[buf_idx]) / close);
-      f[33] = (float)((b18u[buf_idx] - b18l[buf_idx]) / close);
-      f[34] = (float)((b27u[buf_idx] - b27l[buf_idx]) / close);
+      // f[30] and f[31] removed (no USDX/USDJPY for Bitcoin)
+      f[30] = (float)((b9u[buf_idx] - b9l[buf_idx]) / close);
+      f[31] = (float)((b18u[buf_idx] - b18l[buf_idx]) / close);
+      f[32] = (float)((b27u[buf_idx] - b27l[buf_idx]) / close);
 
-      for(int k=0; k<35; k++) {
-         input_data[i * 35 + k] = (f[k] - medians[k]) / (iqrs[k] + 1e-8f);
+      for(int k=0; k<33; k++) {
+         input_data[i * 33 + k] = (f[k] - medians[k]) / (iqrs[k] + 1e-8f);
       }
    }
 
