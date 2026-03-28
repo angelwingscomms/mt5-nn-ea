@@ -2,8 +2,10 @@
 """
 Combines data.mq5, nn.py, and live.mq5 into a single pipeline.md file.
 Each file is wrapped in a code block with appropriate language tagging.
+Use -i flag to also include FLAWS.md.
 """
 
+import argparse
 from pathlib import Path
 
 # Mapping of file extensions to markdown language identifiers
@@ -33,11 +35,21 @@ def get_language_tag(filename: str) -> str:
     return LANG_MAP.get(ext, '')
 
 def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Combine files into pipeline.md')
+    parser.add_argument('-i', '--include-flaws', action='store_true',
+                        help='Include FLAWS.md in the output')
+    args = parser.parse_args()
+    
     # Get the directory this script is in
     script_dir = Path(__file__).parent.resolve()
     
     # Only include these specific files
     include_files = ['data.mq5', 'nn.py', 'live.mq5']
+    
+    # Optionally include FLAWS.md
+    if args.include_flaws:
+        include_files.append('FLAWS.md')
     
     # Get the specified files
     files = [script_dir / name for name in include_files if (script_dir / name).exists()]
@@ -56,6 +68,7 @@ def main():
         lang_tag = get_language_tag(file_path.name)
         
         # Add to output
+        output_lines.append(file_path.name)
         output_lines.append(f"```{lang_tag}")
         output_lines.append(content.rstrip())
         output_lines.append("```")

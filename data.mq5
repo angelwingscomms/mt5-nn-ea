@@ -1,137 +1,245 @@
-﻿//+------------------------------------------------------------------+
-//|                                            Data_Gatherer_144.mq5 |
+#property script_show_inputs // Show settings window
+input int ticks_to_export = 2160000; // Total ticks (~5 days of Gold)
+input string USDX_Symbol = "$USDX"; // Name of USD Index
+input string USDJPY_Symbol = "USDJPY"; // Name of USDJPY
+
+// FLAW 4.4 FIX: Optimized tick data exporting with StringFormat and Two-Pointer Merge
+
 //+------------------------------------------------------------------+
-#include <Trade\Trade.mqh>
-
-CTrade trade;
-int rsi_h, atr_h, adx_h, macd_h, ema54_h, ema144_h, ema216_h, ema540_h;
-
-struct BarRecord {
-    datetime time;
-    double usdx_c, rsi, atr, adx, vi_plus, vi_minus;
-    double ema54, ema144, ema216, ema540;
-    double macd_main, macd_sig, macd_hist;
-    int label_buy;  // -1 = Pending, 0 = Loss, 1 = Win
-    int label_sell; // -1 = Pending, 0 = Loss, 1 = Win
-};
-
-struct TradeTrack { ulong ticket; int history_idx; int type; };
-
-BarRecord history[];
-TradeTrack active_trades[];
-int history_count = 0;
-
-int OnInit() {
-    rsi_h = iRSI(_Symbol, PERIOD_M1, 9, PRICE_CLOSE);
-    atr_h = iATR(_Symbol, PERIOD_M1, 9);
-    adx_h = iADX(_Symbol, PERIOD_M1, 9);
-    macd_h = iMACD(_Symbol, PERIOD_M1, 9, 18, 9, PRICE_CLOSE);
-    ema54_h = iMA(_Symbol, PERIOD_M1, 54, 0, MODE_EMA, PRICE_CLOSE);
-    ema144_h = iMA(_Symbol, PERIOD_M1, 144, 0, MODE_EMA, PRICE_CLOSE);
-    ema216_h = iMA(_Symbol, PERIOD_M1, 216, 0, MODE_EMA, PRICE_CLOSE);
-    ema540_h = iMA(_Symbol, PERIOD_M1, 540, 0, MODE_EMA, PRICE_CLOSE);
-    return(INIT_SUCCEEDED);
+//| Logging helper functions                                          |
+//+------------------------------------------------------------------+
+void LogInfo(string message) {
+   Print("[INFO] ", message);
 }
 
-void OnTick() {
-    CheckClosedTrades();
-    
-    static datetime last_bar;
-    datetime curr_bar = iTime(_Symbol, PERIOD_M1, 0);
-    if(curr_bar == last_bar) return;
-    last_bar = curr_bar;
-
-    // 1. Record Data for the just-closed bar (Index 1)
-    ArrayResize(history, history_count + 1);
-    BarRecord rec;
-    rec.time = iTime(_Symbol, PERIOD_M1, 1);
-    rec.label_buy = -1;  // Mark as pending
-    rec.label_sell = -1; // Mark as pending
-
-    double c = iClose(_Symbol, PERIOD_M1, 1);
-    double usdx[]; CopyClose("$USDX", PERIOD_M1, 1, 1, usdx); rec.usdx_c = usdx[0];
-    
-    double buf[1];
-    CopyBuffer(rsi_h, 0, 1, 1, buf); rec.rsi = buf[0];
-    CopyBuffer(atr_h, 0, 1, 1, buf); rec.atr = buf[0];
-    CopyBuffer(adx_h, 0, 1, 1, buf); rec.adx = buf[0];
-    
-    CopyBuffer(macd_h, 0, 1, 1, buf); rec.macd_main = buf[0];
-    CopyBuffer(macd_h, 1, 1, 1, buf); rec.macd_sig = buf[0];
-    rec.macd_hist = rec.macd_main - rec.macd_sig;
-
-    CopyBuffer(ema54_h, 0, 1, 1, buf); rec.ema54 = buf[0] - c;
-    CopyBuffer(ema144_h, 0, 1, 1, buf); rec.ema144 = buf[0] - c;
-    CopyBuffer(ema216_h, 0, 1, 1, buf); rec.ema216 = buf[0] - c;
-    CopyBuffer(ema540_h, 0, 1, 1, buf); rec.ema540 = buf[0] - c;
-
-    CalcVortex(1, rec.vi_plus, rec.vi_minus);
-    history[history_count] = rec;
-
-    // 2. Place 1 Lot Trades ($144 = 1.44 points on Gold)
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    
-    if(trade.Buy(1.0, _Symbol, ask, ask - 1.44, ask + 1.44)) TrackTrade(trade.ResultOrder(), history_count, 1);
-    if(trade.Sell(1.0, _Symbol, bid, bid + 1.44, bid - 1.44)) TrackTrade(trade.ResultOrder(), history_count, 0);
-
-    history_count++;
+void LogSuccess(string message) {
+   Print("✅ [SUCCESS] ", message);
 }
 
-void CheckClosedTrades() {
-    for(int i = ArraySize(active_trades) - 1; i >= 0; i--) {
-        if(!PositionSelectByTicket(active_trades[i].ticket)) {
-            if(HistorySelectByPosition(active_trades[i].ticket)) {
-                double profit = 0;
-                for(int d = 0; d < HistoryDealsTotal(); d++) 
-                    profit += HistoryDealGetDouble(HistoryDealGetTicket(d), DEAL_PROFIT);
-                
-                int won = (profit > 0) ? 1 : 0; // 1 if Hit TP, 0 if Hit SL
-                
-                if(active_trades[i].type == 1) // Buy Trade resolved
-                    history[active_trades[i].history_idx].label_buy = won;
-                else if(active_trades[i].type == 0) // Sell Trade resolved
-                    history[active_trades[i].history_idx].label_sell = won;
-            }
-            ArrayRemove(active_trades, i, 1);
-        }
-    }
+void LogWarning(string message) {
+   Print("⚠️ [WARNING] ", message);
 }
 
-void TrackTrade(ulong ticket, int idx, int type) {
-    int s = ArraySize(active_trades);
-    ArrayResize(active_trades, s + 1);
-    active_trades[s].ticket = ticket;
-    active_trades[s].history_idx = idx;
-    active_trades[s].type = type;
+void LogError(string message) {
+   Print("❌ [ERROR] ", message);
 }
 
-void CalcVortex(int index, double &vi_plus, double &vi_minus) {
-    double sum_tr = 0, sum_vp = 0, sum_vm = 0;
-    for(int i = 0; i < 9; i++) {
-        int s = index + i;
-        double h = iHigh(_Symbol, PERIOD_CURRENT, s), l = iLow(_Symbol, PERIOD_CURRENT, s);
-        double c_prev = iClose(_Symbol, PERIOD_CURRENT, s+1);
-        sum_tr += MathMax(h-l, MathMax(MathAbs(h-c_prev), MathAbs(l-c_prev)));
-        sum_vp += MathAbs(h - iLow(_Symbol, PERIOD_CURRENT, s+1));
-        sum_vm += MathAbs(l - iHigh(_Symbol, PERIOD_CURRENT, s+1));
-    }
-    vi_plus = (sum_tr == 0) ? 1.0 : sum_vp / sum_tr;
-    vi_minus = (sum_tr == 0) ? 1.0 : sum_vm / sum_tr;
+void LogProgress(string stage, int current, int total, string extra = "") {
+   int percent = (int)((double)current / total * 100);
+   Print("📊 [PROGRESS] ", stage, ": ", current, "/", total, " (", percent, "%)", extra);
 }
 
-void OnDeinit(const int reason) {
-    int h = FileOpen("i.csv", FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON, ",");
-    // Added label_buy and label_sell columns
-    FileWrite(h, "time", "usdx_ret", "rsi", "atr", "adx", "vi_p", "vi_m", "e54", "e144", "e216", "e540", "macd_m", "macd_s", "macd_h", "label_buy", "label_sell");
+void LogSeparator() {
+   Print("═══════════════════════════════════════════════════════════════");
+}
+
+//+------------------------------------------------------------------+
+//| Main script function                                              |
+//+------------------------------------------------------------------+
+void OnStart() {
+   ulong start_time = GetTickCount64(); // Script start timestamp
+   LogSeparator();
+   LogInfo("ACHILLES TICK DATA EXPORTER - Starting execution");
+   LogSeparator();
+   LogInfo(StringFormat("Parameters: ticks_to_export=%d, USDX='%s', USDJPY='%s'", 
+                        ticks_to_export, USDX_Symbol, USDJPY_Symbol));
+   LogInfo(StringFormat("Main symbol: %s", _Symbol));
+   
+   MqlTick ticks[], usdx_ticks[], usdjpy_ticks[]; // Arrays to hold tick data
+   
+   // === SYMBOL SELECTION PHASE ===
+   LogInfo("Phase 1: Symbol Selection");
+   LogInfo(StringFormat("  Attempting to select USDX symbol: '%s'", USDX_Symbol));
+   bool usdx_available = SymbolSelect(USDX_Symbol, true);
+   if(usdx_available) {
+      LogSuccess(StringFormat("  USDX symbol '%s' selected successfully", USDX_Symbol));
+   } else {
+      LogWarning(StringFormat("  USDX symbol '%s' NOT available - will use placeholder (0.0)", USDX_Symbol));
+   }
+   
+   LogInfo(StringFormat("  Attempting to select USDJPY symbol: '%s'", USDJPY_Symbol));
+   bool usdjpy_available = SymbolSelect(USDJPY_Symbol, true);
+   if(usdjpy_available) {
+      LogSuccess(StringFormat("  USDJPY symbol '%s' selected successfully", USDJPY_Symbol));
+   } else {
+      LogWarning(StringFormat("  USDJPY symbol '%s' NOT available - will use placeholder (0.0)", USDJPY_Symbol));
+   }
+   
+   // === TICK DATA COPYING PHASE ===
+   LogSeparator();
+   LogInfo("Phase 2: Tick Data Acquisition");
+   LogInfo(StringFormat("  Copying %d ticks for main symbol '%s'...", ticks_to_export, _Symbol));
+   
+   ulong copy_start = GetTickCount64();
+   int copied = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, 0, ticks_to_export);
+   ulong copy_time = GetTickCount64() - copy_start;
+   
+   if(copied <= 0) {
+      LogError(StringFormat("  Failed to copy ticks for '%s'! Error code: %d", _Symbol, GetLastError()));
+      LogError("  Script terminated - no data to export");
+      return;
+   }
+   LogSuccess(StringFormat("  Copied %d ticks for '%s' in %llu ms", copied, _Symbol, copy_time));
+   
+   // Log tick data time range
+   if(copied > 0) {
+      datetime first_time = (datetime)(ticks[0].time_msc / 1000);
+      datetime last_time = (datetime)(ticks[copied-1].time_msc / 1000);
+      LogInfo(StringFormat("  Tick time range: %s to %s", 
+                           TimeToString(first_time, TIME_DATE|TIME_MINUTES|TIME_SECONDS),
+                           TimeToString(last_time, TIME_DATE|TIME_MINUTES|TIME_SECONDS)));
+   }
+   
+   // Get tick data for auxiliary symbols if available
+   int usdx_copied = 0, usdjpy_copied = 0;
+   
+   if(usdx_available) {
+      LogInfo(StringFormat("  Copying %d ticks for USDX '%s'...", ticks_to_export, USDX_Symbol));
+      copy_start = GetTickCount64();
+      usdx_copied = CopyTicks(USDX_Symbol, usdx_ticks, COPY_TICKS_ALL, 0, ticks_to_export);
+      copy_time = GetTickCount64() - copy_start;
+      
+      if(usdx_copied <= 0) {
+         LogWarning(StringFormat("  USDX ticks not available (error: %d), using placeholder", GetLastError()));
+         usdx_available = false;
+      } else {
+         LogSuccess(StringFormat("  Copied %d USDX ticks in %llu ms", usdx_copied, copy_time));
+      }
+   }
+   
+   if(usdjpy_available) {
+      LogInfo(StringFormat("  Copying %d ticks for USDJPY '%s'...", ticks_to_export, USDJPY_Symbol));
+      copy_start = GetTickCount64();
+      usdjpy_copied = CopyTicks(USDJPY_Symbol, usdjpy_ticks, COPY_TICKS_ALL, 0, ticks_to_export);
+      copy_time = GetTickCount64() - copy_start;
+      
+      if(usdjpy_copied <= 0) {
+         LogWarning(StringFormat("  USDJPY ticks not available (error: %d), using placeholder", GetLastError()));
+         usdjpy_available = false;
+      } else {
+         LogSuccess(StringFormat("  Copied %d USDJPY ticks in %llu ms", usdjpy_copied, copy_time));
+      }
+   }
+   
+    // === FILE CREATION PHASE ===
+    LogSeparator();
+    LogInfo("Phase 3: File Creation");
+    LogInfo("  Creating output file: fast/achilles_ticks.csv");
+    LogInfo("  (MQL5 sandbox restricts to MQL5\\Files, run move_ticks.py after export)");
     
-    for(int i = 0; i < history_count; i++) {
-        double usdx_ret = (i>0) ? (history[i].usdx_c - history[i-1].usdx_c)/history[i-1].usdx_c : 0;
-        FileWrite(h, TimeToString(history[i].time), usdx_ret, history[i].rsi, history[i].atr, history[i].adx, 
-                  history[i].vi_plus, history[i].vi_minus, history[i].ema54, history[i].ema144, 
-                  history[i].ema216, history[i].ema540, history[i].macd_main, history[i].macd_sig, 
-                  history[i].macd_hist, history[i].label_buy, history[i].label_sell);
-    }
-    FileClose(h);
-    Print("✅ CSV Exported.");
+    int h = FileOpen("fast/achilles_ticks.csv", FILE_WRITE|FILE_CSV|FILE_ANSI, ",");
+   if(h == INVALID_HANDLE) {
+      LogError(StringFormat("  Failed to create file! Error code: %d", GetLastError()));
+      LogError("  Script terminated - cannot write data");
+      return;
+   }
+   LogSuccess("  File opened successfully");
+   
+   FileWrite(h, "time_msc,bid,ask,usdx,usdjpy"); // Write CSV header
+   LogInfo("  CSV header written: time_msc,bid,ask,usdx,usdjpy");
+   
+   // === DATA PROCESSING PHASE ===
+   LogSeparator();
+   LogInfo("Phase 4: Data Processing & Export");
+   LogInfo(StringFormat("  Processing %d ticks with Two-Pointer Merge algorithm...", copied));
+   LogInfo("  Algorithm complexity: O(N) - linear time");
+   
+   // FLAW 4.4 FIX: Two-Pointer Merge algorithm for O(N) timestamp alignment
+   int usdx_idx = 0, usdjpy_idx = 0; // Indices for auxiliary tick arrays
+   double usdx_bid = 0.0, usdjpy_bid = 0.0; // Current matched prices
+   
+   int usdx_matches = 0, usdjpy_matches = 0; // Count of successful matches
+   int progress_interval = copied / 10; // Report progress every 10%
+   if(progress_interval < 1000) progress_interval = 1000; // Minimum 1000 ticks between reports
+   
+   ulong process_start = GetTickCount64();
+   
+   for(int i = 0; i < copied; i++) {
+      ulong t = ticks[i].time_msc; // Current tick timestamp
+      
+      // FLAW 4.4 FIX: Two-Pointer Merge for USDX
+      if(usdx_available && usdx_copied > 0) {
+         int prev_idx = usdx_idx;
+         while(usdx_idx < usdx_copied - 1 && usdx_ticks[usdx_idx + 1].time_msc <= t) {
+            usdx_idx++;
+         }
+         if(usdx_idx != prev_idx) usdx_matches++;
+         usdx_bid = usdx_ticks[usdx_idx].bid;
+      }
+      
+      // FLAW 4.4 FIX: Two-Pointer Merge for USDJPY
+      if(usdjpy_available && usdjpy_copied > 0) {
+         int prev_idx = usdjpy_idx;
+         while(usdjpy_idx < usdjpy_copied - 1 && usdjpy_ticks[usdjpy_idx + 1].time_msc <= t) {
+            usdjpy_idx++;
+         }
+         if(usdjpy_idx != prev_idx) usdjpy_matches++;
+         usdjpy_bid = usdjpy_ticks[usdjpy_idx].bid;
+      }
+      
+      // Use StringFormat for efficient string building
+      string row = StringFormat("%lld,%.5f,%.5f,%.5f,%.5f",
+                                ticks[i].time_msc,
+                                ticks[i].bid,
+                                ticks[i].ask,
+                                usdx_bid,
+                                usdjpy_bid);
+      FileWrite(h, row);
+      
+      // Progress reporting
+      if(progress_interval > 0 && (i + 1) % progress_interval == 0) {
+         int percent = (int)((double)(i + 1) / copied * 100);
+         ulong elapsed = GetTickCount64() - process_start;
+         int estimated_total = (int)((double)elapsed / (i + 1) * copied / 1000);
+         int estimated_remaining = (int)((double)elapsed / (i + 1) * (copied - i - 1) / 1000);
+         LogProgress("Export", i + 1, copied, 
+                     StringFormat(" | Elapsed: %ds | ETA: %ds", 
+                                  (int)(elapsed / 1000), estimated_remaining));
+      }
+   }
+   
+   ulong process_time = GetTickCount64() - process_start;
+   
+   // === FILE FINALIZATION PHASE ===
+   LogSeparator();
+   LogInfo("Phase 5: File Finalization");
+   FileClose(h);
+   LogSuccess("  File closed successfully");
+   
+   // Calculate file size estimate (approximate)
+   long file_size_estimate = copied * 60L; // ~60 bytes per row estimate
+   LogInfo(StringFormat("  Estimated file size: ~%.2f MB", (double)file_size_estimate / 1024 / 1024));
+   
+   // === FINAL SUMMARY ===
+   LogSeparator();
+   LogInfo("EXECUTION SUMMARY");
+   LogSeparator();
+   
+   ulong total_time = GetTickCount64() - start_time;
+   
+    LogSuccess(StringFormat("Exported %d ticks to fast/achilles_ticks.csv", copied));
+    LogInfo("  Run 'python fast/move_ticks.py' to move file to project directory");
+    LogInfo(StringFormat("  Main symbol (%s): %d ticks", _Symbol, copied));
+   
+   if(usdx_available) {
+      LogInfo(StringFormat("  USDX (%s): %d ticks loaded, %d timestamp matches", 
+                           USDX_Symbol, usdx_copied, usdx_matches));
+   } else {
+      LogInfo("  USDX: Not available (used placeholder 0.0)");
+   }
+   
+   if(usdjpy_available) {
+      LogInfo(StringFormat("  USDJPY (%s): %d ticks loaded, %d timestamp matches", 
+                           USDJPY_Symbol, usdjpy_copied, usdjpy_matches));
+   } else {
+      LogInfo("  USDJPY: Not available (used placeholder 0.0)");
+   }
+   
+   LogInfo(StringFormat("Processing time: %llu ms (%.2f seconds)", process_time, (double)process_time / 1000));
+   LogInfo(StringFormat("Throughput: %.0f ticks/second", (double)copied / (process_time / 1000.0)));
+   LogInfo(StringFormat("Total script execution time: %llu ms (%.2f seconds)", total_time, (double)total_time / 1000));
+   
+   LogSeparator();
+   LogSuccess("SCRIPT COMPLETED SUCCESSFULLY");
+   LogSeparator();
 }

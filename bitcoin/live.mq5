@@ -1,23 +1,20 @@
-﻿//+------------------------------------------------------------------+
-//|                                              Live_Achilles.mq5   |
-//|                                  Copyright 2026, Achilles Algo   |
+//+------------------------------------------------------------------+
+//|                                              Live_Bitcoin.mq5     |
+//|                                  Copyright 2026, Bitcoin Algo     |
 //+------------------------------------------------------------------+
 #include <Trade\Trade.mqh>
 
 // 1. RESOURCE & INPUTS
-#resource "\\Experts\\nn\\achilles_144.onnx" as uchar model_buffer[]
+#resource "\\Experts\\nn\\bitcoin\\bitcoin_144.onnx" as uchar model_buffer[]
 
 input int    TICK_DENSITY  = 144;      
 input double TP_MULTIPLIER = 2.7;      
 input double SL_MULTIPLIER = 0.54;     
-input string USDX_Symbol   = "$USDX";  
-input string USDJPY_Symbol = "USDJPY"; 
 input int    MAGIC_NUMBER  = 144144;   
 
 // --- SCALING PARAMETERS ---
-// PASTE THE OUTPUT FROM YOUR PYTHON SCRIPT HERE
-float medians[35] = {-0.000006f, 0.104931f, 30150.0f, 0.000127f, 0.000132f, 0.000805f, 0.503401f, 49.824540f, 49.608665f, 49.568888f, 0.000869f, 0.000876f, 0.000880f, -0.000016f, -0.000016f, -0.000000f, 0.000017f, 0.000014f, 0.000043f, 0.000105f, 0.000096f, -126020.69f, -83237.61f, -65911.13f, -49.7117f, -49.7000f, -48.6915f, -0.000023f, -0.000085f, -0.000105f, 0.000000f, 0.000000f, 0.002801f, 0.003922f, 0.004775f};
-float iqrs[35]    = {0.000780f, 0.022743f, 5272.5f, 0.000250f, 0.000255f, 0.000658f, 0.663998f, 21.478885f, 14.504269f, 11.509027f, 0.000528f, 0.000507f, 0.000490f, 0.000749f, 0.000683f, 0.000274f, 0.001109f, 0.001674f, 0.002106f, 0.002950f, 0.005309f, 124022.83f, 75234.65f, 57520.73f, 59.110822f, 57.496001f, 56.672005f, 0.002549f, 0.003638f, 0.004620f, 0.000101f, 0.000113f, 0.002482f, 0.003295f, 0.004007f};
+float medians[33] = {0.00000000f, 27.00000000f, 87.84800000f, 0.00023141f, 0.00023753f, 0.00111235f, 0.50282486f, 50.13602989f, 49.94441432f, 49.98808796f, 0.00118962f, 0.00119550f, 0.00120811f, 0.00000008f, -0.00000390f, 0.00000120f, 0.00000691f, -0.00001362f, -0.00001406f, -0.00000063f, -0.00009099f, -39707.45091325f, -3792.52098882f, 11195.23451692f, -50.34965035f, -50.51903114f, -50.12285012f, -0.00002158f, 0.00000000f, -0.00002834f, 0.00332237f, 0.00459211f, 0.00563987f};
+float iqrs[33]    = {0.00098212f, 0.14583333f, 47.63700000f, 0.00034076f, 0.00035548f, 0.00069236f, 0.56733877f, 20.22841795f, 13.83736542f, 11.20782633f, 0.00041950f, 0.00039227f, 0.00037959f, 0.00116635f, 0.00035128f, 0.00110528f, 0.00129523f, 0.00194593f, 0.00244929f, 0.00356923f, 0.00599302f, 92187.79394857f, 55475.79980033f, 44018.00685251f, 53.81116849f, 53.12096968f, 52.74723642f, 0.00303838f, 0.00435999f, 0.00543748f, 0.00247653f, 0.00321723f, 0.00389436f};
 
 // --- GLOBAL HANDLES ---
 int hRSI9, hRSI18, hRSI27, hATR9, hATR18, hATR27, hMACD, hEMA9, hEMA18, hEMA27, hEMA54, hEMA144, hCCI9, hCCI18, hCCI27, hWPR9, hWPR18, hWPR27, hBB9, hBB18, hBB27;
@@ -25,12 +22,12 @@ long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
 // --- ONNX DATA BUFFERS ---
-float input_data[4200]; // 1 * 120 * 35 = 4200
+float input_data[3960]; // 1 * 120 * 33 = 3960 (Bitcoin has 33 features, not 35)
 float output_data[3];   // Softmax: [Neutral, Buy, Sell]
 
 // --- TICK BAR STORAGE ---
 struct Bar {
-   double o, h, l, c, spread, usdx, jpy;
+   double o, h, l, c, spread;
    long time_start;
 };
 Bar history[150]; // History buffer for returns and momentum
@@ -41,19 +38,14 @@ Bar current_bar;
 //| Initialization                                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   if(!SymbolSelect(USDX_Symbol, true) || !SymbolSelect(USDJPY_Symbol, true)) {
-      Print("❌ Missing Symbols: ", USDX_Symbol, " or ", USDJPY_Symbol);
-      return(INIT_FAILED);
-   }
-   
    onnx_handle = OnnxCreateFromBuffer(model_buffer, ONNX_DEFAULT);
    if(onnx_handle == INVALID_HANDLE) {
       Print("❌ ONNX Handle Error: ", GetLastError());
       return(INIT_FAILED);
    }
 
-   // --- SET FLAT SHAPES (1, 4200) ---
-   const long in_shape[] = {1, 4200};
+   // --- SET FLAT SHAPES (1, 3960) ---
+   const long in_shape[] = {1, 3960};
    const long out_shape[] = {1, 3};
    
    if(!OnnxSetInputShape(onnx_handle, 0, in_shape) && GetLastError() != 5805) return(INIT_FAILED);
@@ -83,7 +75,7 @@ int OnInit() {
    hBB27 = iBands(_Symbol, PERIOD_CURRENT, 27, 0, 2.0, PRICE_CLOSE);
 
    trade.SetExpertMagicNumber(MAGIC_NUMBER);
-   Print("✅ Achilles Online. Flat-Tensor Model Loaded.");
+   Print("✅ Bitcoin Online. Flat-Tensor Model Loaded.");
    return(INIT_SUCCEEDED);
 }
 
@@ -106,8 +98,6 @@ void OnTick() {
 
    if(ticks_in_bar >= TICK_DENSITY) {
       current_bar.spread /= (double)TICK_DENSITY;
-      current_bar.usdx = SymbolInfoDouble(USDX_Symbol, SYMBOL_BID);
-      current_bar.jpy = SymbolInfoDouble(USDJPY_Symbol, SYMBOL_BID);
       
       // Shift and save history
       for(int i=149; i>0; i--) history[i] = history[i-1];
@@ -140,15 +130,12 @@ void Predict() {
    CopyBuffer(hBB18,1,0,120,b18u); CopyBuffer(hBB18,2,0,120,b18l);
    CopyBuffer(hBB27,1,0,120,b27u); CopyBuffer(hBB27,2,0,120,b27l);
 
-   // Populate the flat 4200 array
+   // Populate the flat 3960 array (33 features * 120 bars)
    for(int i=0; i<120; i++) {
       int h_idx = 119 - i; // Older bars first [119 ... 0]
-      int ind = i;         // Index in indicator buffer (where 0 is newest)
-      // Note: pandas_ta calculates newest at the bottom of the dataframe. 
-      // We fill the 120-window such that i=0 is oldest and i=119 is newest bar.
       int buf_idx = 119 - i; // Index in copied indicator buffers corresponding to h_idx
       
-      float f[35];
+      float f[33]; // Bitcoin has 33 features (no USDX/USDJPY)
       double close = history[h_idx].c;
       
       f[0] = (float)MathLog(close / (history[h_idx+1].c + 1e-8));
@@ -168,14 +155,13 @@ void Predict() {
       f[27] = (float)((close - history[h_idx+9].c) / close);
       f[28] = (float)((close - history[h_idx+18].c) / close);
       f[29] = (float)((close - history[h_idx+27].c) / close);
-      f[30] = (float)((history[h_idx].usdx - history[h_idx+1].usdx) / (history[h_idx+1].usdx + 1e-8));
-      f[31] = (float)((history[h_idx].jpy - history[h_idx+1].jpy) / (history[h_idx+1].jpy + 1e-8));
-      f[32] = (float)((b9u[buf_idx] - b9l[buf_idx]) / close);
-      f[33] = (float)((b18u[buf_idx] - b18l[buf_idx]) / close);
-      f[34] = (float)((b27u[buf_idx] - b27l[buf_idx]) / close);
+      // f[30] and f[31] removed (no USDX/USDJPY for Bitcoin)
+      f[30] = (float)((b9u[buf_idx] - b9l[buf_idx]) / close);
+      f[31] = (float)((b18u[buf_idx] - b18l[buf_idx]) / close);
+      f[32] = (float)((b27u[buf_idx] - b27l[buf_idx]) / close);
 
-      for(int k=0; k<35; k++) {
-         input_data[i * 35 + k] = (f[k] - medians[k]) / (iqrs[k] + 1e-8f);
+      for(int k=0; k<33; k++) {
+         input_data[i * 33 + k] = (f[k] - medians[k]) / (iqrs[k] + 1e-8f);
       }
    }
 
