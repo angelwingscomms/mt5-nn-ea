@@ -55,7 +55,7 @@ from tensorflow.keras.layers import Bidirectional, LSTM, MultiHeadAttention, Lay
 tf.keras.utils.set_random_seed(42)
 
 # --- CONFIG ---
-TICK_DENSITY = 144
+TICK_DENSITY = 540
 SEQ_LEN = 120
 TARGET_HORIZON = 30 # Bars
 
@@ -66,7 +66,7 @@ df = df_t.groupby('bar_id').agg({'bid':['first','max','min','last'], 'vol':'sum'
 df.columns = ['open','high','low','close','volume','time_open']
 df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask']-x['bid']).mean()).values
 
-def get_symmetric_labels(df, tp_mult=27, sl_mult=5.4):
+def get_symmetric_labels(df, tp_mult=9, sl_mult=5.4):
     c, hi, lo = df.close.values, df.high.values, df.low.values
     atr = ta.atr(df.high, df.low, df.close, length=18).values
     labels = np.zeros(len(df), dtype=int)
@@ -172,7 +172,7 @@ cw = compute_class_weight('balanced', classes=np.array([0, 1, 2]), y=y_seq[:spli
 assert split > 0 and split < len(X_seq), f"Split {split} out of range for X_seq len {len(X_seq)}"
 model.fit(X_seq[:split].reshape(-1, 2040), y_seq[:split], 
           validation_data=(X_seq[split:].reshape(-1, 2040), y_seq[split:]),
-          epochs=1, batch_size=64, class_weight=dict(enumerate(cw)),
+          epochs=54, batch_size=64, class_weight=dict(enumerate(cw)),
           callbacks=[tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)])
 
 # Export
@@ -190,9 +190,9 @@ live.mq5
 ﻿#include <Trade\Trade.mqh>
 #resource "\\Experts\\nn\\bitcoin\\bitcoin_144.onnx" as uchar model_buffer[]
 
-input int TICK_DENSITY = 144;
+input int TICK_DENSITY = 54;
 input double SL_MULTIPLIER = 5.4;
-input double TP_MULTIPLIER = 27;
+input double TP_MULTIPLIER = 9;
 long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
@@ -335,6 +335,6 @@ void Execute(int sig) {
       Print("[WARN] Stop/TP too close to price, skipping trade.");
       return;
    }
-   trade.PositionOpen(_Symbol,(sig==1?ORDER_TYPE_BUY:ORDER_TYPE_SELL),0.54,p,sl,tp);
+   trade.PositionOpen(_Symbol,(sig==1?ORDER_TYPE_BUY:ORDER_TYPE_SELL),0.72,p,sl,tp);
 }
 ```
