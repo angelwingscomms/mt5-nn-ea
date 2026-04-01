@@ -3,9 +3,9 @@
 
 #resource "\\Experts\\nn\\gold\\gold_mamba.onnx" as uchar model_buffer[]
 
-#define SEQ_LEN 54
+#define SEQ_LEN 27
 #define FEATURE_COUNT 9
-#define REQUIRED_HISTORY_INDEX (SEQ_LEN + 7)
+#define REQUIRED_HISTORY_INDEX (SEQ_LEN + 8)
 #define HISTORY_SIZE (REQUIRED_HISTORY_INDEX + 1)
 #define INPUT_BUFFER_SIZE (SEQ_LEN * MODEL_FEATURE_COUNT)
 
@@ -24,7 +24,6 @@ struct Bar {
    double c;
    double spread;
    double tick_imbalance;
-   double atr14;
    double atr9;
    ulong time_msc;
    bool valid;
@@ -40,7 +39,6 @@ double last_bid = 0.0;
 int last_sign = 1;
 double primary_expected_abs_theta = 60.0;
 int warmup_count = 0;
-double warmup_sum14 = 0.0;
 double warmup_sum9 = 0.0;
 float input_data[INPUT_BUFFER_SIZE];
 float output_data[3];
@@ -160,14 +158,6 @@ void UpdateIndicators(Bar &bar) {
       : MathMax(bar.h - bar.l, MathMax(MathAbs(bar.h - prev.c), MathAbs(bar.l - prev.c)));
    int next_count = warmup_count + 1;
 
-   if(next_count <= 14) {
-      warmup_sum14 += tr;
-      bar.atr14 = warmup_sum14 / next_count;
-   } else {
-      double prev_atr14 = (prev.atr14 > 0.0 ? prev.atr14 : tr);
-      bar.atr14 = prev_atr14 + (tr - prev_atr14) / 14.0;
-   }
-
    if(next_count <= 9) {
       warmup_sum9 += tr;
       bar.atr9 = warmup_sum9 / next_count;
@@ -177,7 +167,7 @@ void UpdateIndicators(Bar &bar) {
    }
 
    warmup_count = next_count;
-   bar.valid = (warmup_count >= 16);
+   bar.valid = (warmup_count >= 9);
 }
 
 bool ShouldClosePrimaryBar(double &observed_abs_theta) {
@@ -288,7 +278,7 @@ double ReturnOverBars(int h, int bars) {
 }
 
 double RollingStdReturn(int h, int window) {
-   double values[8];
+   double values[9];
    double mean = 0.0;
    for(int i = 0; i < window; i++) {
       values[i] = LogReturnAt(h + i);
@@ -314,9 +304,9 @@ void ExtractFeatures(int h, float &features[]) {
    features[2] = ScaleAndClip((float)SafeLogRatio(bar.l, prev.c), 2);
    features[3] = ScaleAndClip((float)(bar.spread / (close + 1e-10)), 3);
    features[4] = ScaleAndClip((float)((close - bar.l) / (bar.h - bar.l + 1e-8)), 4);
-   features[5] = ScaleAndClip((float)(bar.atr14 / (close + 1e-10)), 5);
-   features[6] = ScaleAndClip((float)RollingStdReturn(h, 4), 6);
-   features[7] = ScaleAndClip((float)ReturnOverBars(h, 8), 7);
+   features[5] = ScaleAndClip((float)(bar.atr9 / (close + 1e-10)), 5);
+   features[6] = ScaleAndClip((float)RollingStdReturn(h, 9), 6);
+   features[7] = ScaleAndClip((float)ReturnOverBars(h, 9), 7);
    features[8] = ScaleAndClip((float)bar.tick_imbalance, 8);
 }
 

@@ -21,8 +21,9 @@ logging.basicConfig(
 log = logging.getLogger("gold.nn")
 
 EPS = 1e-10
-SEQ_LEN = 54
-TARGET_HORIZON = 30
+SEQ_LEN = 27
+TARGET_HORIZON = 27
+TARGET_HORIZON = 54
 DEFAULT_DATA_FILE = "gold_market_ticks.csv"
 DEFAULT_OUTPUT_FILE = "gold_mamba.onnx"
 FEATURE_COLUMNS = (
@@ -31,9 +32,9 @@ FEATURE_COLUMNS = (
     "low_rel_prev",
     "spread_rel",
     "close_in_range",
-    "atr14_rel",
-    "rv4",
-    "ret8",
+    "atr9_rel",
+    "rv9",
+    "ret9",
     "tick_imbalance",
 )
 MODEL_FEATURE_COUNT = len(FEATURE_COLUMNS)
@@ -43,10 +44,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the stripped-down GOLD Mamba pipeline.")
     parser.add_argument("--data-file", type=str, default=DEFAULT_DATA_FILE, help="CSV with symbol,time_msc,bid,ask.")
     parser.add_argument("--output-file", type=str, default=DEFAULT_OUTPUT_FILE, help="ONNX output file.")
-    parser.add_argument("--epochs", type=int, default=16, help="Maximum training epochs.")
-    parser.add_argument("--batch-size", type=int, default=64, help="Training batch size.")
-    parser.add_argument("--max-train-windows", type=int, default=1536, help="Training window cap.")
-    parser.add_argument("--max-eval-windows", type=int, default=384, help="Validation/test window cap.")
+    parser.add_argument("--epochs", type=int, default=18, help="Maximum training epochs.")
+    parser.add_argument("--batch-size", type=int, default=54, help="Training batch size.")
+    parser.add_argument("--max-train-windows", type=int, default=1458, help="Training window cap.")
+    parser.add_argument("--max-eval-windows", type=int, default=378, help="Validation/test window cap.")
     parser.add_argument(
         "--imbalance-min-ticks",
         type=int,
@@ -56,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--imbalance-ema-span",
         type=int,
-        default=20,
+        default=18,
         help="EWMA span for the imbalance threshold.",
     )
     parser.add_argument("--device", type=str, default="", help="Optional torch device override.")
@@ -86,7 +87,7 @@ def compute_tick_signs(prices: np.ndarray) -> np.ndarray:
     return signs
 
 
-def wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+def wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 9) -> pd.Series:
     high_values = high.to_numpy(dtype=np.float64, copy=False)
     low_values = low.to_numpy(dtype=np.float64, copy=False)
     close_values = close.to_numpy(dtype=np.float64, copy=False)
@@ -173,7 +174,7 @@ def compute_features(df: pd.DataFrame) -> np.ndarray:
     close = df["close"].astype(float)
     prev_close = close.shift(1)
     ret1 = np.log(close / (prev_close + EPS))
-    atr14 = wilder_atr(df["high"], df["low"], close, period=14)
+    atr9 = wilder_atr(df["high"], df["low"], close, period=9)
 
     feat = pd.DataFrame(index=df.index)
     feat["ret1"] = ret1
@@ -181,9 +182,9 @@ def compute_features(df: pd.DataFrame) -> np.ndarray:
     feat["low_rel_prev"] = np.log(df["low"] / (prev_close + EPS))
     feat["spread_rel"] = df["spread"] / (close + EPS)
     feat["close_in_range"] = (close - df["low"]) / (df["high"] - df["low"] + 1e-8)
-    feat["atr14_rel"] = atr14 / (close + EPS)
-    feat["rv4"] = ret1.rolling(4, min_periods=4).std(ddof=0)
-    feat["ret8"] = np.log(close / (close.shift(8) + EPS))
+    feat["atr9_rel"] = atr9 / (close + EPS)
+    feat["rv9"] = ret1.rolling(9, min_periods=9).std(ddof=0)
+    feat["ret9"] = np.log(close / (close.shift(9) + EPS))
     feat["tick_imbalance"] = df["tick_imbalance"].astype(float)
     return feat.loc[:, FEATURE_COLUMNS].to_numpy(dtype=np.float32, copy=False)
 
@@ -200,7 +201,7 @@ def get_triple_barrier_labels(
     spread = df_gold["spread"].to_numpy(dtype=np.float64, copy=False)
     ask_high = df_gold["ask_high"].to_numpy(dtype=np.float64, copy=False)
     ask_low = df_gold["ask_low"].to_numpy(dtype=np.float64, copy=False)
-    atr = wilder_atr(df_gold["high"], df_gold["low"], df_gold["close"], period=9).to_numpy(dtype=np.float64, copy=False)
+    atr = wilder_atr(df_gold["high"], df_gold["low"], df_gold["close"], period=TARGET_ATR_PERIOD).to_numpy(dtype=np.float64, copy=False)
 
     labels = np.zeros(len(df_gold), dtype=np.int64)
     for i in range(len(df_gold) - horizon):
@@ -405,7 +406,7 @@ def main() -> None:
     x = compute_features(df_gold)
     y = get_triple_barrier_labels(df_gold)
 
-    warmup = 16
+    warmup = 9
     x = x[warmup:]
     y = y[warmup:]
     n_rows = len(x)
@@ -452,12 +453,12 @@ def main() -> None:
     model = GoldMambaLiteClassifier(n_features=MODEL_FEATURE_COUNT).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, weight_decay=1e-4)
     train_loader = make_loader(x_train, y_train, args.batch_size, shuffle=True)
-    val_loader = make_loader(x_val, y_val, max(args.batch_size, 64), shuffle=False)
-    test_loader = make_loader(x_test, y_test, max(args.batch_size, 64), shuffle=False)
+    val_loader = make_loader(x_val, y_val, max(args.batch_size, 54), shuffle=False)
+    test_loader = make_loader(x_test, y_test, max(args.batch_size, 54), shuffle=False)
 
     best_state = None
     best_val_loss = float("inf")
-    patience = 4
+    patience = 9
     wait = 0
 
     for epoch in range(args.epochs):
