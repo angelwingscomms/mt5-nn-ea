@@ -421,8 +421,9 @@ def main():
     torch.onnx.export(
         model, dummy, "gold_mamba.onnx",
         input_names=["input"], output_names=["output"],
-        opset_version=13,
+        opset_version=14,
         dynamic_axes={"input": {0: "batch"}},
+        dynamo=False,
     )
     print("✅ ONNX saved: gold_mamba.onnx")
 

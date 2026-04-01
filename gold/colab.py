@@ -448,8 +448,9 @@ def main():
     torch.onnx.export(
         model, dummy, onnx_path,
         input_names=["input"], output_names=["output"],
-        opset_version=13,
+        opset_version=14,
         dynamic_axes={"input": {0: "batch"}},
+        dynamo=False,
     )
     print(f"✅ ONNX saved: {onnx_path}")
 
