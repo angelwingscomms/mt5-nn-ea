@@ -81,8 +81,11 @@ RETURN_PERIOD = int(SHARED["RETURN_PERIOD"])
 WARMUP_BARS = int(SHARED["WARMUP_BARS"])
 IMBALANCE_MIN_TICKS = int(SHARED["IMBALANCE_MIN_TICKS"])
 IMBALANCE_EMA_SPAN = int(SHARED["IMBALANCE_EMA_SPAN"])
-SL_MULTIPLIER = float(SHARED["DEFAULT_SL_MULTIPLIER"])
-TP_MULTIPLIER = float(SHARED["DEFAULT_TP_MULTIPLIER"])
+LABEL_SL_MULTIPLIER = float(SHARED["LABEL_SL_MULTIPLIER"])
+LABEL_TP_MULTIPLIER = float(SHARED["LABEL_TP_MULTIPLIER"])
+EXECUTION_SL_MULTIPLIER = float(SHARED["DEFAULT_SL_MULTIPLIER"])
+EXECUTION_TP_MULTIPLIER = float(SHARED["DEFAULT_TP_MULTIPLIER"])
+USE_ALL_WINDOWS = bool(int(SHARED["USE_ALL_WINDOWS"]))
 DEFAULT_EPOCHS = int(SHARED["DEFAULT_EPOCHS"])
 DEFAULT_BATCH_SIZE = int(SHARED["DEFAULT_BATCH_SIZE"])
 DEFAULT_MAX_TRAIN_WINDOWS = int(SHARED["DEFAULT_MAX_TRAIN_WINDOWS"])
@@ -271,10 +274,10 @@ def get_triple_barrier_labels(df_gold: pd.DataFrame) -> np.ndarray:
 
         long_entry = close[i] + spread[i]
         short_entry = close[i]
-        long_tp = long_entry + TP_MULTIPLIER * vol
-        long_sl = long_entry - SL_MULTIPLIER * vol
-        short_tp = short_entry - TP_MULTIPLIER * vol
-        short_sl = short_entry + SL_MULTIPLIER * vol
+        long_tp = long_entry + LABEL_TP_MULTIPLIER * vol
+        long_sl = long_entry - LABEL_SL_MULTIPLIER * vol
+        short_tp = short_entry - LABEL_TP_MULTIPLIER * vol
+        short_sl = short_entry + LABEL_SL_MULTIPLIER * vol
 
         long_result = 0
         short_result = 0
@@ -311,6 +314,12 @@ def choose_evenly_spaced(indices: np.ndarray, max_count: int) -> np.ndarray:
         return indices.astype(np.int64, copy=False)
     positions = np.linspace(0, len(indices) - 1, max_count)
     return indices[np.unique(np.round(positions).astype(np.int64))]
+
+
+def maybe_cap_windows(indices: np.ndarray, max_count: int, use_all_windows: bool) -> np.ndarray:
+    if use_all_windows:
+        return indices.astype(np.int64, copy=False)
+    return choose_evenly_spaced(indices, max_count)
 
 
 def build_segment_end_indices(
@@ -490,6 +499,8 @@ def write_diagnostics(
     val_probs: np.ndarray,
     test_probs: np.ndarray,
     primary_confidence: float,
+    available_window_counts: dict[str, int],
+    used_window_counts: dict[str, int],
 ) -> None:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -530,8 +541,11 @@ def write_diagnostics(
         f"- rv_period: {RV_PERIOD}",
         f"- return_period: {RETURN_PERIOD}",
         f"- warmup_bars: {WARMUP_BARS}",
-        f"- sl_multiplier: {SL_MULTIPLIER:.2f}",
-        f"- tp_multiplier: {TP_MULTIPLIER:.2f}",
+        f"- label_sl_multiplier: {LABEL_SL_MULTIPLIER:.2f}",
+        f"- label_tp_multiplier: {LABEL_TP_MULTIPLIER:.2f}",
+        f"- execution_sl_multiplier: {EXECUTION_SL_MULTIPLIER:.2f}",
+        f"- execution_tp_multiplier: {EXECUTION_TP_MULTIPLIER:.2f}",
+        f"- use_all_windows: {int(USE_ALL_WINDOWS)}",
         f"- primary_confidence: {primary_confidence:.4f}",
         "",
         "## Bar Stats",
@@ -548,6 +562,14 @@ def write_diagnostics(
         *[f"  - {line}" for line in class_count_lines(y_val)],
         "- holdout windows:",
         *[f"  - {line}" for line in class_count_lines(y_test)],
+        "",
+        "## Window Usage",
+        f"- train_available: {available_window_counts['train']}",
+        f"- train_used: {used_window_counts['train']}",
+        f"- validation_available: {available_window_counts['validation']}",
+        f"- validation_used: {used_window_counts['validation']}",
+        f"- holdout_available: {available_window_counts['holdout']}",
+        f"- holdout_used: {used_window_counts['holdout']}",
         "",
         "## Validation",
         f"- selected_trades: {int(selected_val.sum())}",
@@ -569,6 +591,8 @@ def write_diagnostics(
         "",
         "## Note",
         "- Imbalance bars are variable by design. Lowering imbalance_min_ticks makes them smaller on average, but it does not force a fixed tick count per bar.",
+        "- Labels now use the stricter label_sl_multiplier and label_tp_multiplier values, so a BUY/SELL label means price reached the target before making more than a tiny adverse move.",
+        "- When use_all_windows is 0, the trainer evenly subsamples window endpoints down to the max_train_windows and max_eval_windows caps to keep runs fast.",
     ]
     (diagnostics_dir / "report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
@@ -604,7 +628,7 @@ def main() -> None:
     log.info("Using device: %s", device)
     log.info(
         "Shared config | seq_len=%d horizon=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
-        "imbalance_min_ticks=%d imbalance_ema_span=%d sl=%.2f tp=%.2f",
+        "imbalance_min_ticks=%d imbalance_ema_span=%d label_sl=%.2f label_tp=%.2f exec_sl=%.2f exec_tp=%.2f use_all_windows=%d",
         SEQ_LEN,
         TARGET_HORIZON,
         FEATURE_ATR_PERIOD,
@@ -613,8 +637,11 @@ def main() -> None:
         RETURN_PERIOD,
         IMBALANCE_MIN_TICKS,
         IMBALANCE_EMA_SPAN,
-        SL_MULTIPLIER,
-        TP_MULTIPLIER,
+        LABEL_SL_MULTIPLIER,
+        LABEL_TP_MULTIPLIER,
+        EXECUTION_SL_MULTIPLIER,
+        EXECUTION_TP_MULTIPLIER,
+        int(USE_ALL_WINDOWS),
     )
 
     df_gold = build_gold_bars(data_path)
@@ -642,20 +669,23 @@ def main() -> None:
     x_scaled = np.clip((x - median) / iqr, -10.0, 10.0).astype(np.float32)
     valid_mask = ~np.isnan(x_scaled).any(axis=1)
 
-    train_end_idx = choose_evenly_spaced(
-        build_segment_end_indices(valid_mask, *train_range, SEQ_LEN, TARGET_HORIZON),
-        args.max_train_windows,
-    )
-    val_end_idx = choose_evenly_spaced(
-        build_segment_end_indices(valid_mask, *val_range, SEQ_LEN, TARGET_HORIZON),
-        args.max_eval_windows,
-    )
-    test_end_idx = choose_evenly_spaced(
-        build_segment_end_indices(valid_mask, *test_range, SEQ_LEN, TARGET_HORIZON),
-        args.max_eval_windows,
-    )
+    train_end_idx_all = build_segment_end_indices(valid_mask, *train_range, SEQ_LEN, TARGET_HORIZON)
+    val_end_idx_all = build_segment_end_indices(valid_mask, *val_range, SEQ_LEN, TARGET_HORIZON)
+    test_end_idx_all = build_segment_end_indices(valid_mask, *test_range, SEQ_LEN, TARGET_HORIZON)
+    train_end_idx = maybe_cap_windows(train_end_idx_all, args.max_train_windows, USE_ALL_WINDOWS)
+    val_end_idx = maybe_cap_windows(val_end_idx_all, args.max_eval_windows, USE_ALL_WINDOWS)
+    test_end_idx = maybe_cap_windows(test_end_idx_all, args.max_eval_windows, USE_ALL_WINDOWS)
     if min(len(train_end_idx), len(val_end_idx), len(test_end_idx)) == 0:
         raise ValueError("One or more leakage-safe splits ended up empty.")
+    log.info(
+        "Window usage | train=%d/%d val=%d/%d test=%d/%d",
+        len(train_end_idx),
+        len(train_end_idx_all),
+        len(val_end_idx),
+        len(val_end_idx_all),
+        len(test_end_idx),
+        len(test_end_idx_all),
+    )
 
     x_train, y_train = build_windows(x_scaled, y, train_end_idx, SEQ_LEN)
     x_val, y_val = build_windows(x_scaled, y, val_end_idx, SEQ_LEN)
@@ -753,6 +783,16 @@ def main() -> None:
         val_probs=val_probs,
         test_probs=test_probs,
         primary_confidence=primary_confidence,
+        available_window_counts={
+            "train": len(train_end_idx_all),
+            "validation": len(val_end_idx_all),
+            "holdout": len(test_end_idx_all),
+        },
+        used_window_counts={
+            "train": len(train_end_idx),
+            "validation": len(val_end_idx),
+            "holdout": len(test_end_idx),
+        },
     )
     log.info("Saved ONNX to %s", output_path)
     log.info("Saved config to %s", config_path)

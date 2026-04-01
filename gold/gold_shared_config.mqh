@@ -20,15 +20,22 @@
 #define WARMUP_BARS 9
 #define REQUIRED_HISTORY_INDEX (SEQ_LEN + RETURN_PERIOD - 1)
 
-#define IMBALANCE_MIN_TICKS 9
-#define IMBALANCE_EMA_SPAN 9
+#define IMBALANCE_MIN_TICKS 18
+#define IMBALANCE_EMA_SPAN 18
 
+// Training labels: how little adverse movement is allowed before a move stops counting as "clean".
+#define LABEL_SL_MULTIPLIER 0.01
+#define LABEL_TP_MULTIPLIER 0.54
+
+// Live execution defaults: where actual broker orders place stop loss / take profit.
 #define DEFAULT_SL_MULTIPLIER 0.54
 #define DEFAULT_TP_MULTIPLIER 0.54
 #define DEFAULT_LOT_SIZE 0.54
 
+// Trainer window usage: 1 = use every eligible window in each split, 0 = obey the max_* caps below.
+#define USE_ALL_WINDOWS 1
 #define DEFAULT_EPOCHS 18
 #define DEFAULT_BATCH_SIZE 54
-#define DEFAULT_MAX_TRAIN_WINDOWS 1458
-#define DEFAULT_MAX_EVAL_WINDOWS 378
+#define DEFAULT_MAX_TRAIN_WINDOWS 5400
+#define DEFAULT_MAX_EVAL_WINDOWS 540
 #define DEFAULT_PATIENCE 9
