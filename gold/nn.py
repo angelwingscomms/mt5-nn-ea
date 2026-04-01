@@ -30,7 +30,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
-from shared_mamba import SharedMambaClassifier
+from gold_mamba_lite import GoldMambaLiteClassifier
 
 EPS = 1e-10
 SEQ_LEN = 120
@@ -155,6 +155,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32, help="Fine-tuning batch size.")
     parser.add_argument("--max-train-windows", type=int, default=3072, help="Training window cap for slow laptops.")
     parser.add_argument("--max-eval-windows", type=int, default=1024, help="Validation/calibration/test window cap.")
+    parser.add_argument(
+        "--mamba-backend",
+        choices=("auto", "portable"),
+        default="auto",
+        help="Use MambaLite-Micro's mamba_simple backend when available, or force the portable fallback.",
+    )
     parser.add_argument("--device", type=str, default="", help="Optional torch device override.")
     return parser.parse_args()
 
@@ -499,7 +505,7 @@ def build_windows(
 
 
 class MaskedNextBarHead(nn.Module):
-    def __init__(self, backbone: SharedMambaClassifier, target_dim: int):
+    def __init__(self, backbone: GoldMambaLiteClassifier, target_dim: int):
         super().__init__()
         self.backbone = backbone
         self.head = nn.Sequential(
@@ -845,7 +851,7 @@ def _main_inner() -> None:
         f"pretrain_epochs={args.pretrain_epochs}, batch_size={args.batch_size}, "
         f"bar_mode={args.bar_mode}, imbalance_min_ticks={args.imbalance_min_ticks}, "
         f"imbalance_ema_span={args.imbalance_ema_span}, focal_gamma={args.focal_gamma}, "
-        f"feature_set={feature_spec.name}"
+        f"feature_set={feature_spec.name}, mamba_backend={args.mamba_backend}"
     )
     log.info(f"Args: max_train_windows={args.max_train_windows}, max_eval_windows={args.max_eval_windows}")
 
@@ -956,17 +962,18 @@ def _main_inner() -> None:
     class_weights = torch.tensor([weight_dict.get(i, 1.0) for i in range(3)], dtype=torch.float32, device=device)
     log.info(f"Class weights: {[round(float(v), 4) for v in class_weights.cpu().numpy()]}")
 
-    log.info("Building SharedMambaClassifier model...")
-    model = SharedMambaClassifier(
+    log.info("Building GoldMambaLiteClassifier model...")
+    model = GoldMambaLiteClassifier(
         n_features=feature_spec.n_features,
         d_model=48,
         hidden=96,
         dropout=0.20,
         n_layers=2,
         use_sequence_norm=True,
+        prefer_upstream=args.mamba_backend == "auto",
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    log.info(f"Model params: {n_params:,}")
+    log.info(f"Model params: {n_params:,}, backend={model.backend_name}")
 
     if args.pretrain_init and args.pretrain_epochs > 0:
         t_pretrain = time.time()
