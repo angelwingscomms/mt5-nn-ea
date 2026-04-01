@@ -6,6 +6,27 @@ import torch.nn.functional as F
 from torch import nn
 
 
+class SequenceInstanceNorm(nn.Module):
+    def __init__(self, n_features: int, eps: float = 1e-5, affine: bool = True):
+        super().__init__()
+        self.eps = eps
+        self.affine = affine
+        if affine:
+            self.weight = nn.Parameter(torch.ones(n_features))
+            self.bias = nn.Parameter(torch.zeros(n_features))
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        mean = x.mean(dim=1, keepdim=True)
+        var = x.var(dim=1, keepdim=True, unbiased=False)
+        x = (x - mean) / torch.sqrt(var + self.eps)
+        if self.affine:
+            x = x * self.weight.view(1, 1, -1) + self.bias.view(1, 1, -1)
+        return x
+
+
 class RMSNorm(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-5):
         super().__init__()
@@ -187,8 +208,11 @@ class SharedMambaClassifier(nn.Module):
         dropout: float = 0.4,
         n_layers: int = 2,
         dt_rank: int | str = "auto",
+        use_sequence_norm: bool = False,
     ):
         super().__init__()
+        self.d_model = d_model
+        self.sequence_norm = SequenceInstanceNorm(n_features) if use_sequence_norm else nn.Identity()
         self.embedding = nn.Linear(n_features, d_model) if d_model != n_features else nn.Identity()
         self.layers = nn.ModuleList(
             [
@@ -211,13 +235,19 @@ class SharedMambaClassifier(nn.Module):
             nn.Linear(hidden, n_classes),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.sequence_norm(x)
         x = self.embedding(x)
         for layer in self.layers:
             x = layer(x)
-        x = self.norm(x)
-        # Use the last timestep for causal prediction
-        x = x[:, -1, :]
+        return self.norm(x)
+
+    def encode_last(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.encode_sequence(x)
+        return x[:, -1, :]
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.encode_last(x)
         return self.head(x)
 
 
