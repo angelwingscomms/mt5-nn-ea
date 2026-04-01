@@ -6,6 +6,7 @@ import logging
 import math
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 logging.basicConfig(
@@ -37,7 +38,7 @@ TARGET_HORIZON = 30
 SYMBOL_ORDER = ("XAUUSD", "$USDX", "USDJPY")
 DEFAULT_DATA_FILE = "gold_market_ticks.csv"
 DEFAULT_OUTPUT_FILE = "gold_mamba.onnx"
-GOLD_FEATURE_COLUMNS = (
+RICH_GOLD_FEATURE_COLUMNS = (
     "ret1",
     "high_rel_prev",
     "low_rel_prev",
@@ -48,13 +49,59 @@ GOLD_FEATURE_COLUMNS = (
     "rv4",
     "rv16",
     "ret8",
+    "tick_imbalance",
     "hour_sin",
     "hour_cos",
 )
-AUX_FEATURE_COLUMNS = ("ret1", "close_in_range", "atr14_rel", "ret8")
-N_FEATURES = len(GOLD_FEATURE_COLUMNS) + 2 * len(AUX_FEATURE_COLUMNS)
-PRETRAIN_TARGET_INDICES = (0, 1, 2, 6, 12, 16)
-META_FEATURE_INPUT_INDICES = (3, 6, 7, 8)
+RICH_AUX_FEATURE_COLUMNS = ("ret1", "ret1_lag1", "close_in_range", "atr14_rel", "ret8")
+RAW_SYMBOL_FEATURE_COLUMNS = ("bid", "ask", "time_sod_s")
+RICH_PRETRAIN_TARGET_INDICES = (0, 1, 2, 6, 13, 18)
+RICH_META_FEATURE_INPUT_INDICES = (3, 6, 7, 8)
+META_EXTRA_FEATURE_COUNT = 4
+META_FEATURE_COUNT = 3 + 1 + 1 + 1 + META_EXTRA_FEATURE_COUNT
+MAX_PRETRAIN_TARGETS = 6
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    name: str
+    rich: bool
+    gold_feature_columns: tuple[str, ...]
+    aux_feature_columns: tuple[str, ...]
+    n_features: int
+    pretrain_target_indices: tuple[int, ...]
+    meta_feature_input_indices: tuple[int, ...]
+
+
+def build_feature_spec(use_rich_features: bool) -> FeatureSpec:
+    if use_rich_features:
+        n_features = len(RICH_GOLD_FEATURE_COLUMNS) + 2 * len(RICH_AUX_FEATURE_COLUMNS)
+        return FeatureSpec(
+            name="rich",
+            rich=True,
+            gold_feature_columns=RICH_GOLD_FEATURE_COLUMNS,
+            aux_feature_columns=RICH_AUX_FEATURE_COLUMNS,
+            n_features=n_features,
+            pretrain_target_indices=RICH_PRETRAIN_TARGET_INDICES,
+            meta_feature_input_indices=RICH_META_FEATURE_INPUT_INDICES,
+        )
+
+    n_features = len(RAW_SYMBOL_FEATURE_COLUMNS) * len(SYMBOL_ORDER)
+    return FeatureSpec(
+        name="raw",
+        rich=False,
+        gold_feature_columns=RAW_SYMBOL_FEATURE_COLUMNS,
+        aux_feature_columns=RAW_SYMBOL_FEATURE_COLUMNS,
+        n_features=n_features,
+        pretrain_target_indices=tuple(range(min(MAX_PRETRAIN_TARGETS, n_features))),
+        meta_feature_input_indices=tuple(range(min(META_EXTRA_FEATURE_COUNT, n_features))),
+    )
+
+
+def pad_meta_input_indices(indices: tuple[int, ...]) -> tuple[int, ...]:
+    padded = list(indices[:META_EXTRA_FEATURE_COUNT])
+    padded.extend([-1] * (META_EXTRA_FEATURE_COUNT - len(padded)))
+    return tuple(padded)
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,6 +111,12 @@ def parse_args() -> argparse.Namespace:
         "--pretrain-init",
         action="store_true",
         help="Enable the cheap self-supervised warmup before the main supervised training.",
+    )
+    parser.add_argument(
+        "-r",
+        "--rich-features",
+        action="store_true",
+        help="Use the original indicator-heavy feature set. Without this flag, training uses only bid, ask, and time for the 3 symbols.",
     )
     parser.add_argument("--tick-density", type=int, default=540, help="Ticks per primary XAUUSD bar.")
     parser.add_argument("--data-file", type=str, default=DEFAULT_DATA_FILE, help="Combined CSV with symbol,time_msc,bid,ask.")
@@ -75,6 +128,30 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Cheap self-supervised warmup epochs. Only used when -i is enabled.",
     )
+    parser.add_argument(
+        "--bar-mode",
+        choices=("tick", "imbalance"),
+        default="tick",
+        help="Primary bar construction mode.",
+    )
+    parser.add_argument(
+        "--imbalance-min-ticks",
+        type=int,
+        default=180,
+        help="Minimum primary ticks before an imbalance bar may close.",
+    )
+    parser.add_argument(
+        "--imbalance-ema-span",
+        type=int,
+        default=20,
+        help="EWMA span for the imbalance threshold.",
+    )
+    parser.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=1.5,
+        help="Gamma for multiclass focal loss. Set 0 to recover weighted cross-entropy.",
+    )
     parser.add_argument("--batch-size", type=int, default=32, help="Fine-tuning batch size.")
     parser.add_argument("--max-train-windows", type=int, default=3072, help="Training window cap for slow laptops.")
     parser.add_argument("--max-eval-windows", type=int, default=1024, help="Validation/calibration/test window cap.")
@@ -82,10 +159,80 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_aligned_bars(csv_path: str, symbols: tuple[str, ...], tick_density: int) -> dict[str, pd.DataFrame]:
+def resolve_local_path(path_str: str) -> Path:
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+    return Path(__file__).resolve().with_name(path_str)
+
+
+def compute_tick_signs(prices: np.ndarray) -> np.ndarray:
+    signs = np.empty(len(prices), dtype=np.int8)
+    last_sign = 1
+    prev_price = float(prices[0]) if len(prices) else 0.0
+    for i, price in enumerate(prices):
+        if i > 0:
+            diff = float(price) - prev_price
+            if diff > 0.0:
+                last_sign = 1
+            elif diff < 0.0:
+                last_sign = -1
+        signs[i] = last_sign
+        prev_price = float(price)
+    return signs
+
+
+def build_primary_bar_ids(
+    df_gold: pd.DataFrame,
+    bar_mode: str,
+    tick_density: int,
+    imbalance_min_ticks: int,
+    imbalance_ema_span: int,
+) -> np.ndarray:
+    if bar_mode == "tick":
+        return np.arange(len(df_gold), dtype=np.int64) // tick_density
+
+    prices = df_gold["bid"].to_numpy(dtype=np.float64, copy=False)
+    tick_signs = compute_tick_signs(prices)
+    alpha = 2.0 / (max(1, imbalance_ema_span) + 1.0)
+    expected_abs_theta = max(2.0, float(max(2, imbalance_min_ticks // 3)))
+    bar_ids = np.empty(len(prices), dtype=np.int64)
+    current_bar = 0
+    ticks_in_bar = 0
+    theta = 0.0
+    closed_bars = 0
+
+    for i, sign in enumerate(tick_signs):
+        bar_ids[i] = current_bar
+        ticks_in_bar += 1
+        theta += float(sign)
+
+        if ticks_in_bar >= imbalance_min_ticks and abs(theta) >= expected_abs_theta:
+            observed = max(2.0, abs(theta))
+            expected_abs_theta = (1.0 - alpha) * expected_abs_theta + alpha * observed
+            current_bar += 1
+            ticks_in_bar = 0
+            theta = 0.0
+            closed_bars += 1
+
+    log.info(
+        f"build_primary_bar_ids: mode=imbalance, bars={current_bar + 1}, closed={closed_bars}, "
+        f"final_expected_abs_theta={expected_abs_theta:.2f}"
+    )
+    return bar_ids
+
+
+def build_aligned_bars(
+    csv_path: str,
+    symbols: tuple[str, ...],
+    tick_density: int,
+    bar_mode: str,
+    imbalance_min_ticks: int,
+    imbalance_ema_span: int,
+) -> dict[str, pd.DataFrame]:
     t0 = time.time()
     log.info(f"Loading combined tick CSV: {csv_path}...")
-    df_all = pd.read_csv(csv_path)
+    df_all = pd.read_csv(csv_path, usecols=lambda c: c in {"symbol", "time_msc", "bid", "ask"})
     log.info(f"CSV loaded: {len(df_all)} rows, columns={list(df_all.columns)}, elapsed={time.time()-t0:.2f}s")
     df_all["symbol"] = df_all["symbol"].astype(str).str.upper()
 
@@ -95,12 +242,19 @@ def build_aligned_bars(csv_path: str, symbols: tuple[str, ...], tick_density: in
         raise ValueError(f"No ticks found for {sym_gold}")
     log.info(f"Gold ticks: {len(df_gold)}, time_msc range=[{df_gold['time_msc'].iloc[0]}, {df_gold['time_msc'].iloc[-1]}]")
 
-    df_gold["bar_id"] = np.arange(len(df_gold)) // tick_density
+    df_gold["bar_id"] = build_primary_bar_ids(
+        df_gold,
+        bar_mode=bar_mode,
+        tick_density=tick_density,
+        imbalance_min_ticks=imbalance_min_ticks,
+        imbalance_ema_span=imbalance_ema_span,
+    )
     n_bars_gold = df_gold["bar_id"].nunique()
     bar_ends = df_gold.groupby("bar_id")["time_msc"].last().values
-    log.info(f"Gold bar_id assigned: {n_bars_gold} bars, tick_density={tick_density}")
+    log.info(f"Gold bar_id assigned: {n_bars_gold} bars, bar_mode={bar_mode}, tick_density={tick_density}")
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
+    gold_time_open = df_gold.groupby("bar_id")["time_msc"].first()
     for sym in symbols:
         t_sym = time.time()
         df_sym = df_all[df_all["symbol"] == sym].sort_values("time_msc").reset_index(drop=True)
@@ -109,7 +263,7 @@ def build_aligned_bars(csv_path: str, symbols: tuple[str, ...], tick_density: in
         log.info(f"{sym}: {len(df_sym)} ticks loaded, binning to gold bars...")
 
         if sym == sym_gold:
-            df_sym_binned = df_gold
+            df_sym_binned = df_gold.copy()
         else:
             bar_ids = np.searchsorted(bar_ends, df_sym["time_msc"].values, side="left")
             valid = bar_ids < len(bar_ends)
@@ -117,9 +271,11 @@ def build_aligned_bars(csv_path: str, symbols: tuple[str, ...], tick_density: in
             df_sym_binned["bar_id"] = bar_ids[valid]
             log.info(f"{sym}: {valid.sum()}/{len(valid)} ticks within bar range, {df_sym_binned['bar_id'].nunique()} unique bars")
 
+        df_sym_binned["tick_sign"] = compute_tick_signs(df_sym_binned["bid"].to_numpy(dtype=np.float64, copy=False))
         has_ask = "ask" in df_sym_binned.columns
         log.info(f"{sym}: has_ask={has_ask}")
-        agg = {"bid": ["first", "max", "min", "last"], "time_msc": "first"}
+
+        agg = {"bid": ["first", "max", "min", "last"], "time_msc": "first", "tick_sign": "mean"}
         if has_ask:
             df_sym_binned["spread"] = df_sym_binned["ask"] - df_sym_binned["bid"]
             agg_spread = df_sym_binned.groupby("bar_id")["spread"].last()
@@ -127,10 +283,10 @@ def build_aligned_bars(csv_path: str, symbols: tuple[str, ...], tick_density: in
 
         df_bars = df_sym_binned.groupby("bar_id").agg(agg)
         if has_ask:
-            df_bars.columns = ["open", "high", "low", "close", "time_open", "ask_high", "ask_low"]
+            df_bars.columns = ["open", "high", "low", "close", "time_open", "tick_imbalance", "ask_high", "ask_low"]
             df_bars["spread"] = agg_spread
         else:
-            df_bars.columns = ["open", "high", "low", "close", "time_open"]
+            df_bars.columns = ["open", "high", "low", "close", "time_open", "tick_imbalance"]
             df_bars["spread"] = 0.0
             df_bars["ask_high"] = df_bars["high"]
             df_bars["ask_low"] = df_bars["low"]
@@ -144,10 +300,10 @@ def build_aligned_bars(csv_path: str, symbols: tuple[str, ...], tick_density: in
         df_bars["spread"] = df_bars["spread"].ffill().bfill().fillna(0.0)
         df_bars["ask_high"] = df_bars["ask_high"].fillna(df_bars["high"] + df_bars["spread"])
         df_bars["ask_low"] = df_bars["ask_low"].fillna(df_bars["low"] + df_bars["spread"])
+        df_bars["tick_imbalance"] = df_bars["tick_imbalance"].fillna(0.0)
         log.info(f"{sym}: NaN close filled={n_nan_close}, reindexed to {len(bar_ends)} bars")
 
         if sym != sym_gold:
-            gold_time_open = df_gold.groupby("bar_id")["time_msc"].first()
             df_bars["time_open"] = df_bars["time_open"].fillna(gold_time_open).ffill().bfill()
 
         bars_by_symbol[sym] = df_bars.reset_index(drop=True)
@@ -161,40 +317,52 @@ def rolling_std(values: pd.Series, window: int) -> pd.Series:
     return values.rolling(window, min_periods=window).std(ddof=0)
 
 
-def compute_features(df: pd.DataFrame, symbol_idx: int = 0) -> np.ndarray:
+def compute_features(df: pd.DataFrame, feature_spec: FeatureSpec, symbol_idx: int = 0) -> np.ndarray:
     t0 = time.time()
     sym_name = SYMBOL_ORDER[symbol_idx] if symbol_idx < len(SYMBOL_ORDER) else f"idx={symbol_idx}"
-    log.info(f"compute_features({sym_name}): starting on {len(df)} bars...")
+    log.info(f"compute_features({sym_name}, mode={feature_spec.name}): starting on {len(df)} bars...")
     df = df.copy()
-    df["dt"] = pd.to_datetime(df["time_open"], unit="ms", utc=True)
-
-    c = df["close"].astype(float)
-    prev_c = c.shift(1)
-    ret1 = np.log(c / (prev_c + EPS))
-
     feat = pd.DataFrame(index=df.index)
-    feat["ret1"] = ret1
-    feat["close_in_range"] = (c - df["low"]) / (df["high"] - df["low"] + 1e-8)
-    feat["atr14_rel"] = ta.atr(df["high"], df["low"], c, length=14) / (c + EPS)
-    feat["ret8"] = np.log(c / (c.shift(8) + EPS))
 
-    if symbol_idx == 0:
-        feat["high_rel_prev"] = np.log(df["high"] / (prev_c + EPS))
-        feat["low_rel_prev"] = np.log(df["low"] / (prev_c + EPS))
-        feat["spread_rel"] = df["spread"] / (c + EPS)
-        feat["duration_s"] = df["dt"].diff().dt.total_seconds().fillna(0.0)
-        feat["rv4"] = rolling_std(ret1, 4)
-        feat["rv16"] = rolling_std(ret1, 16)
-        hours = df["dt"].dt.hour + (df["dt"].dt.minute / 60.0)
-        feat["hour_sin"] = np.sin(2.0 * np.pi * hours / 24.0)
-        feat["hour_cos"] = np.cos(2.0 * np.pi * hours / 24.0)
-        feature_columns = GOLD_FEATURE_COLUMNS
+    if feature_spec.rich:
+        df["dt"] = pd.to_datetime(df["time_open"], unit="ms", utc=True)
+        c = df["close"].astype(float)
+        prev_c = c.shift(1)
+        ret1 = np.log(c / (prev_c + EPS))
+
+        feat["ret1"] = ret1
+        feat["ret1_lag1"] = ret1.shift(1)
+        feat["close_in_range"] = (c - df["low"]) / (df["high"] - df["low"] + 1e-8)
+        feat["atr14_rel"] = ta.atr(df["high"], df["low"], c, length=14) / (c + EPS)
+        feat["ret8"] = np.log(c / (c.shift(8) + EPS))
+
+        if symbol_idx == 0:
+            feat["high_rel_prev"] = np.log(df["high"] / (prev_c + EPS))
+            feat["low_rel_prev"] = np.log(df["low"] / (prev_c + EPS))
+            feat["spread_rel"] = df["spread"] / (c + EPS)
+            feat["duration_s"] = df["dt"].diff().dt.total_seconds().fillna(0.0)
+            feat["rv4"] = rolling_std(ret1, 4)
+            feat["rv16"] = rolling_std(ret1, 16)
+            feat["tick_imbalance"] = df["tick_imbalance"].astype(float)
+            hours = df["dt"].dt.hour + (df["dt"].dt.minute / 60.0)
+            feat["hour_sin"] = np.sin(2.0 * np.pi * hours / 24.0)
+            feat["hour_cos"] = np.cos(2.0 * np.pi * hours / 24.0)
+            feature_columns = feature_spec.gold_feature_columns
+        else:
+            feature_columns = feature_spec.aux_feature_columns
     else:
-        feature_columns = AUX_FEATURE_COLUMNS
+        close = df["close"].astype(float)
+        feat["bid"] = close
+        feat["ask"] = close + df["spread"].astype(float)
+        feat["time_sod_s"] = ((df["time_open"].astype(np.int64) // 1000) % 86400).astype(np.float64)
+        feature_columns = feature_spec.gold_feature_columns
 
     result = feat.loc[:, feature_columns].values.astype(np.float32)
     nan_count = int(np.isnan(result).sum())
-    log.info(f"compute_features({sym_name}): done, shape={result.shape}, NaNs={nan_count}, elapsed={time.time()-t0:.2f}s")
+    log.info(
+        f"compute_features({sym_name}, mode={feature_spec.name}): done, shape={result.shape}, "
+        f"NaNs={nan_count}, elapsed={time.time()-t0:.2f}s"
+    )
     return result
 
 
@@ -344,6 +512,25 @@ class MaskedNextBarHead(nn.Module):
         return self.head(self.backbone.encode_last(x))
 
 
+class MultiClassFocalLoss(nn.Module):
+    def __init__(self, alpha: torch.Tensor | None = None, gamma: float = 1.5):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(logits, dim=-1)
+        probs = log_probs.exp()
+        target_log_probs = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        target_probs = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        focal_term = torch.pow(1.0 - target_probs, self.gamma)
+        loss = -focal_term * target_log_probs
+        if self.alpha is not None:
+            alpha_t = self.alpha.to(logits.device).gather(0, targets)
+            loss = loss * alpha_t
+        return loss.mean()
+
+
 def make_loaders(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -419,16 +606,28 @@ def apply_temperature(logits: np.ndarray, temperature: float) -> np.ndarray:
     return probs
 
 
-def build_meta_features(probs: np.ndarray, x_seq: np.ndarray) -> np.ndarray:
+def build_meta_features(
+    probs: np.ndarray,
+    x_seq: np.ndarray,
+    meta_feature_input_indices: tuple[int, ...],
+) -> np.ndarray:
     max_prob = probs.max(axis=1)
     second_prob = np.partition(probs, -2, axis=1)[:, -2]
     entropy = -(probs * np.log(probs + 1e-12)).sum(axis=1)
     last_step = x_seq[:, -1, :]
-    extras = last_step[:, META_FEATURE_INPUT_INDICES]
+    extras = np.zeros((len(probs), META_EXTRA_FEATURE_COUNT), dtype=np.float32)
+    valid_indices = [idx for idx in meta_feature_input_indices if 0 <= idx < last_step.shape[1]]
+    if valid_indices:
+        extras[:, : len(valid_indices)] = last_step[:, valid_indices]
     return np.column_stack([probs, max_prob, max_prob - second_prob, entropy, extras]).astype(np.float32)
 
 
-def train_meta_classifier(probs: np.ndarray, labels: np.ndarray, x_seq: np.ndarray) -> LogisticRegression | None:
+def train_meta_classifier(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    x_seq: np.ndarray,
+    meta_feature_input_indices: tuple[int, ...],
+) -> LogisticRegression | None:
     t0 = time.time()
     preds = probs.argmax(axis=1)
     candidate_mask = preds > 0
@@ -438,7 +637,7 @@ def train_meta_classifier(probs: np.ndarray, labels: np.ndarray, x_seq: np.ndarr
         log.info(f"train_meta_classifier: skipped (only {n_candidates} candidates, need >=40), elapsed={time.time()-t0:.3f}s")
         return None
 
-    features = build_meta_features(probs[candidate_mask], x_seq[candidate_mask])
+    features = build_meta_features(probs[candidate_mask], x_seq[candidate_mask], meta_feature_input_indices)
     targets = (preds[candidate_mask] == labels[candidate_mask]).astype(np.int64)
     unique_targets = np.unique(targets)
     n_correct = int(targets.sum())
@@ -460,6 +659,7 @@ def choose_thresholds(
     labels: np.ndarray,
     x_seq: np.ndarray,
     meta_model: LogisticRegression | None,
+    meta_feature_input_indices: tuple[int, ...],
 ) -> tuple[float, float]:
     t0 = time.time()
     log.info(f"choose_thresholds: searching grid on {len(probs)} samples...")
@@ -470,7 +670,7 @@ def choose_thresholds(
     meta_grid = [0.0]
 
     if meta_model is not None and candidate_mask.any():
-        candidate_features = build_meta_features(probs[candidate_mask], x_seq[candidate_mask])
+        candidate_features = build_meta_features(probs[candidate_mask], x_seq[candidate_mask], meta_feature_input_indices)
         meta_probs[candidate_mask] = meta_model.predict_proba(candidate_features)[:, 1]
         meta_grid = list(np.linspace(0.45, 0.90, 19))
         log.info(f"  choose_thresholds: meta model applied, meta_grid size={len(meta_grid)}")
@@ -512,13 +712,14 @@ def summarize_gate(
     primary_thr: float,
     meta_model: LogisticRegression | None,
     meta_thr: float,
+    meta_feature_input_indices: tuple[int, ...],
 ) -> None:
     preds = probs.argmax(axis=1)
     candidate_mask = preds > 0
     selected = candidate_mask & (probs.max(axis=1) >= primary_thr)
 
     if meta_model is not None and candidate_mask.any():
-        meta_features = build_meta_features(probs[candidate_mask], x_seq[candidate_mask])
+        meta_features = build_meta_features(probs[candidate_mask], x_seq[candidate_mask], meta_feature_input_indices)
         meta_probs = meta_model.predict_proba(meta_features)[:, 1]
         selected_candidates = meta_probs >= meta_thr
         selected = candidate_mask.copy()
@@ -538,8 +739,16 @@ def format_float_array(values: np.ndarray) -> str:
     return ", ".join(f"{float(v):.8f}f" for v in values)
 
 
+def format_int_array(values: tuple[int, ...]) -> str:
+    return ", ".join(str(int(v)) for v in values)
+
+
 def build_export_block(
+    feature_spec: FeatureSpec,
     tick_density: int,
+    bar_mode: str,
+    imbalance_min_ticks: int,
+    imbalance_ema_span: int,
     medians: np.ndarray,
     iqrs: np.ndarray,
     temperature: float,
@@ -547,23 +756,61 @@ def build_export_block(
     meta_thr: float,
     meta_model: LogisticRegression | None,
 ) -> str:
-    meta_weights = np.zeros(3 + 1 + 1 + 1 + len(META_FEATURE_INPUT_INDICES), dtype=np.float32)
+    meta_weights = np.zeros(META_FEATURE_COUNT, dtype=np.float32)
     meta_bias = 0.0
     if meta_model is not None:
         meta_weights = meta_model.coef_[0].astype(np.float32)
         meta_bias = float(meta_model.intercept_[0])
+    meta_input_indices = pad_meta_input_indices(feature_spec.meta_feature_input_indices)
 
+    config_lines = [
+        f"input int    FEATURE_SET         = {1 if feature_spec.rich else 0};",
+        f"input int    MODEL_FEATURE_COUNT = {feature_spec.n_features};",
+        f"input int    BAR_MODE            = {1 if bar_mode == 'imbalance' else 0};",
+        f"input int    TICK_DENSITY        = {tick_density};",
+        f"input int    IMBALANCE_MIN_TICKS = {imbalance_min_ticks};",
+        f"input int    IMBALANCE_EMA_SPAN  = {imbalance_ema_span};",
+        f"input double TEMPERATURE         = {temperature:.8f};",
+        f"input double PRIMARY_CONFIDENCE  = {primary_thr:.8f};",
+        f"input double META_THRESHOLD      = {meta_thr:.8f};",
+        f"float medians[{feature_spec.n_features}] = {{{format_float_array(medians)}}};",
+        f"float iqrs[{feature_spec.n_features}]    = {{{format_float_array(iqrs)}}};",
+        f"int meta_input_indices[{META_EXTRA_FEATURE_COUNT}] = {{{format_int_array(meta_input_indices)}}};",
+        f"float meta_weights[{len(meta_weights)}] = {{{format_float_array(meta_weights)}}};",
+        f"float meta_bias = {meta_bias:.8f}f;",
+    ]
+    return "\n".join(["--- PASTE THESE INTO gold/live.mq5 ---", *config_lines])
+
+
+def build_mql_config(
+    feature_spec: FeatureSpec,
+    tick_density: int,
+    bar_mode: str,
+    imbalance_min_ticks: int,
+    imbalance_ema_span: int,
+    medians: np.ndarray,
+    iqrs: np.ndarray,
+    temperature: float,
+    primary_thr: float,
+    meta_thr: float,
+    meta_model: LogisticRegression | None,
+) -> str:
     return "\n".join(
         [
-            "--- PASTE THESE INTO gold/live.mq5 ---",
-            f"input int    TICK_DENSITY        = {tick_density};",
-            f"input double TEMPERATURE         = {temperature:.8f};",
-            f"input double PRIMARY_CONFIDENCE  = {primary_thr:.8f};",
-            f"input double META_THRESHOLD      = {meta_thr:.8f};",
-            f"float medians[{N_FEATURES}] = {{{format_float_array(medians)}}};",
-            f"float iqrs[{N_FEATURES}]    = {{{format_float_array(iqrs)}}};",
-            f"float meta_weights[{len(meta_weights)}] = {{{format_float_array(meta_weights)}}};",
-            f"float meta_bias = {meta_bias:.8f}f;",
+            "// Auto-generated by gold/nn.py. Re-run training to refresh these values.",
+            build_export_block(
+                feature_spec,
+                tick_density,
+                bar_mode,
+                imbalance_min_ticks,
+                imbalance_ema_span,
+                medians,
+                iqrs,
+                temperature,
+                primary_thr,
+                meta_thr,
+                meta_model,
+            ).split("\n", 1)[1],
         ]
     )
 
@@ -582,18 +829,35 @@ def _main_inner() -> None:
     args = parse_args()
     torch.manual_seed(42)
     np.random.seed(42)
+    feature_spec = build_feature_spec(args.rich_features)
+
+    data_path = resolve_local_path(args.data_file)
+    output_path = resolve_local_path(args.output_file)
+    export_path = Path(__file__).resolve().with_name("gold_export_values.txt")
+    config_path = Path(__file__).resolve().with_name("gold_model_config.mqh")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"Using device: {device}")
-    log.info(f"Args: tick_density={args.tick_density}, data_file={args.data_file}, output_file={args.output_file}")
+    log.info(f"Args: tick_density={args.tick_density}, data_file={data_path}, output_file={output_path}")
     log.info(
         f"Args: epochs={args.epochs}, pretrain_init={args.pretrain_init}, "
-        f"pretrain_epochs={args.pretrain_epochs}, batch_size={args.batch_size}"
+        f"pretrain_epochs={args.pretrain_epochs}, batch_size={args.batch_size}, "
+        f"bar_mode={args.bar_mode}, imbalance_min_ticks={args.imbalance_min_ticks}, "
+        f"imbalance_ema_span={args.imbalance_ema_span}, focal_gamma={args.focal_gamma}, "
+        f"feature_set={feature_spec.name}"
     )
     log.info(f"Args: max_train_windows={args.max_train_windows}, max_eval_windows={args.max_eval_windows}")
 
     t_step = time.time()
-    bars_by_symbol = build_aligned_bars(args.data_file, SYMBOL_ORDER, args.tick_density)
+    bars_by_symbol = build_aligned_bars(
+        str(data_path),
+        SYMBOL_ORDER,
+        args.tick_density,
+        args.bar_mode,
+        args.imbalance_min_ticks,
+        args.imbalance_ema_span,
+    )
     df_gold = bars_by_symbol[SYMBOL_ORDER[0]]
     df_usdx = bars_by_symbol[SYMBOL_ORDER[1]]
     df_usdjpy = bars_by_symbol[SYMBOL_ORDER[2]]
@@ -605,11 +869,11 @@ def _main_inner() -> None:
     log.info(f"Aligned bar count: {n_bars}")
 
     log.info("Computing features for all symbols...")
-    feat_gold = compute_features(df_gold, symbol_idx=0)
-    feat_usdx = compute_features(df_usdx, symbol_idx=1)
-    feat_usdjpy = compute_features(df_usdjpy, symbol_idx=2)
+    feat_gold = compute_features(df_gold, feature_spec, symbol_idx=0)
+    feat_usdx = compute_features(df_usdx, feature_spec, symbol_idx=1)
+    feat_usdjpy = compute_features(df_usdjpy, feature_spec, symbol_idx=2)
     X = np.concatenate([feat_gold, feat_usdx, feat_usdjpy], axis=1)
-    assert X.shape[1] == N_FEATURES, f"Expected {N_FEATURES} features, got {X.shape[1]}"
+    assert X.shape[1] == feature_spec.n_features, f"Expected {feature_spec.n_features} features, got {X.shape[1]}"
     log.info(f"Feature matrix X shape={X.shape}, NaN_count={int(np.isnan(X).sum())}")
 
     log.info("Computing triple-barrier labels...")
@@ -694,7 +958,7 @@ def _main_inner() -> None:
 
     log.info("Building SharedMambaClassifier model...")
     model = SharedMambaClassifier(
-        n_features=N_FEATURES,
+        n_features=feature_spec.n_features,
         d_model=48,
         hidden=96,
         dropout=0.20,
@@ -708,10 +972,10 @@ def _main_inner() -> None:
         t_pretrain = time.time()
         pretrain_count = min(len(x_train), args.max_train_windows)
         pretrain_inputs = x_train[:pretrain_count].copy()
-        pretrain_targets = pretrain_inputs[:, -1, PRETRAIN_TARGET_INDICES].copy()
+        pretrain_targets = pretrain_inputs[:, -1, feature_spec.pretrain_target_indices].copy()
         pretrain_inputs[:, -1, :] = 0.0
 
-        pretrain_model = MaskedNextBarHead(model, target_dim=len(PRETRAIN_TARGET_INDICES)).to(device)
+        pretrain_model = MaskedNextBarHead(model, target_dim=len(feature_spec.pretrain_target_indices)).to(device)
         pretrain_loader = DataLoader(
             TensorDataset(torch.from_numpy(pretrain_inputs), torch.from_numpy(pretrain_targets.astype(np.float32))),
             batch_size=args.batch_size,
@@ -723,7 +987,10 @@ def _main_inner() -> None:
 
         log.info(f"=== SELF-SUPERVISED WARMUP START ===")
         log.info(f"  windows={pretrain_count}, epochs={args.pretrain_epochs}, batches/epoch={n_pretrain_batches}, batch_size={args.batch_size}")
-        log.info(f"  target_indices={PRETRAIN_TARGET_INDICES}, target_dim={len(PRETRAIN_TARGET_INDICES)}")
+        log.info(
+            f"  target_indices={feature_spec.pretrain_target_indices}, "
+            f"target_dim={len(feature_spec.pretrain_target_indices)}"
+        )
         log.info(f"  optimizer=AdamW(lr=6e-4, wd=1e-4), criterion=SmoothL1Loss")
         for epoch in range(args.pretrain_epochs):
             epoch_t0 = time.time()
@@ -774,7 +1041,7 @@ def _main_inner() -> None:
     n_train_batches = len(train_loader)
     log.info(f"  train_loader: {n_train_batches} batches, val_loader: {len(val_loader)} batches")
     optimizer = torch.optim.AdamW(model.parameters(), lr=6e-4, weight_decay=1e-4)
-    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.02)
+    criterion = MultiClassFocalLoss(alpha=class_weights, gamma=args.focal_gamma)
 
     best_val_loss = float("inf")
     best_state = None
@@ -814,7 +1081,12 @@ def _main_inner() -> None:
 
         log.info(f"  epoch {epoch:02d} evaluating on val set...")
         val_logits, val_labels = evaluate_model(model, val_loader, device)
-        val_loss = float(F.cross_entropy(torch.tensor(val_logits), torch.tensor(val_labels), weight=class_weights.cpu()).item())
+        val_loss = float(
+            criterion(
+                torch.tensor(val_logits, dtype=torch.float32, device=device),
+                torch.tensor(val_labels, dtype=torch.long, device=device),
+            ).item()
+        )
         train_loss = float(np.mean(train_losses))
         epoch_dt = time.time() - epoch_t0
         log.info(f"  Epoch {epoch:02d} | train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | epoch_dt={epoch_dt:.2f}s | wait={wait}/{patience}")
@@ -860,45 +1132,94 @@ def _main_inner() -> None:
     log.info(f"Applying temperature scaling to meta logits...")
     meta_probs = apply_temperature(meta_logits, temperature)
     log.info(f"Meta probs shape={meta_probs.shape}, mean_conf={meta_probs.max(axis=1).mean():.4f}")
-    meta_model = train_meta_classifier(meta_probs, meta_labels, x_meta)
+    meta_model = train_meta_classifier(meta_probs, meta_labels, x_meta, feature_spec.meta_feature_input_indices)
     if meta_model is None:
         log.warning("Meta-label gate skipped because the calibration slice was too small or one-sided.")
     else:
         log.info("Meta-label gate trained.")
 
     log.info("Choosing thresholds...")
-    primary_thr, meta_thr = choose_thresholds(meta_probs, meta_labels, x_meta, meta_model)
+    primary_thr, meta_thr = choose_thresholds(
+        meta_probs,
+        meta_labels,
+        x_meta,
+        meta_model,
+        feature_spec.meta_feature_input_indices,
+    )
     log.info(f"Selected thresholds | primary={primary_thr:.3f} meta={meta_thr:.3f}")
-    summarize_gate("calibration", meta_probs, meta_labels, x_meta, primary_thr, meta_model, meta_thr)
+    summarize_gate(
+        "calibration",
+        meta_probs,
+        meta_labels,
+        x_meta,
+        primary_thr,
+        meta_model,
+        meta_thr,
+        feature_spec.meta_feature_input_indices,
+    )
 
     log.info("Evaluating on holdout test set...")
     test_logits, test_labels = evaluate_model(model, test_loader, device)
     test_probs = apply_temperature(test_logits, temperature)
-    summarize_gate("holdout", test_probs, test_labels, x_test, primary_thr, meta_model, meta_thr)
+    summarize_gate(
+        "holdout",
+        test_probs,
+        test_labels,
+        x_test,
+        primary_thr,
+        meta_model,
+        meta_thr,
+        feature_spec.meta_feature_input_indices,
+    )
 
     log.info("Exporting to ONNX...")
     model.eval()
     model.to("cpu")
-    dummy = torch.randn(1, SEQ_LEN, N_FEATURES)
+    dummy = torch.randn(1, SEQ_LEN, feature_spec.n_features)
     torch.onnx.export(
         model,
         dummy,
-        args.output_file,
+        str(output_path),
         input_names=["input"],
         output_names=["output"],
         opset_version=14,
-        dynamic_axes={"input": {0: "batch"}},
         dynamo=False,
     )
-    log.info(f"ONNX saved: {args.output_file}")
+    log.info(f"ONNX saved: {output_path}")
 
-    export_block = build_export_block(args.tick_density, median, iqr, temperature, primary_thr, meta_thr, meta_model)
-    export_path = Path("gold_export_values.txt")
+    export_block = build_export_block(
+        feature_spec,
+        args.tick_density,
+        args.bar_mode,
+        args.imbalance_min_ticks,
+        args.imbalance_ema_span,
+        median,
+        iqr,
+        temperature,
+        primary_thr,
+        meta_thr,
+        meta_model,
+    )
+    config_source = build_mql_config(
+        feature_spec,
+        args.tick_density,
+        args.bar_mode,
+        args.imbalance_min_ticks,
+        args.imbalance_ema_span,
+        median,
+        iqr,
+        temperature,
+        primary_thr,
+        meta_thr,
+        meta_model,
+    )
     export_path.write_text(export_block + "\n", encoding="utf-8")
+    config_path.write_text(config_source + "\n", encoding="utf-8")
     log.info("Export block:")
     for line in export_block.split("\n"):
         log.info(f"  {line}")
     log.info(f"Export values also written to {export_path}")
+    log.info(f"MQL config include written to {config_path}")
 
 
 if __name__ == "__main__":
