@@ -1,4 +1,4 @@
-﻿#include <Trade\Trade.mqh>
+#include <Trade\Trade.mqh>
 #resource "\\Experts\\nn\\bitcoin\\bitcoin_mamba_144.onnx" as uchar model_buffer[]
 
 input int TICK_DENSITY = 54;
@@ -8,19 +8,19 @@ long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
 // PASTE FROM PYTHON OUTPUT
-float medians[17] = {-0.00000439f, 27.00000000f, 268.29100000f, 0.00028073f, 0.00029178f, 0.00140701f, 0.50154799f, 0.00007258f, 0.00006459f, -0.00001585f, 0.00149410f, 0.00000000f, -0.25881905f, 0.00000000f, -0.22252093f, 1.85629799f, 0.00108218f};
-float iqrs[17] = {0.00130049f, 0.04936111f, 109.56350000f, 0.00043169f, 0.00045235f, 0.00090441f, 0.59345870f, 0.00143933f, 0.00135949f, 0.00045600f, 0.00063614f, 1.41421356f, 1.20710678f, 1.56366296f, 1.52445867f, 1.00000000f, 0.01014560f};
+float medians[15] = {-0.00000439f, 27.00000000f, 268.29100000f, 0.00028073f, 0.00029178f, 0.00140701f, 0.50154799f, 0.00007258f, 0.00006459f, -0.00001585f, 0.00149410f, 0.00000000f, -0.25881905f, 0.00000000f, -0.22252093f};
+float iqrs[15] = {0.00130049f, 0.04936111f, 109.56350000f, 0.00043169f, 0.00045235f, 0.00090441f, 0.59345870f, 0.00143933f, 0.00135949f, 0.00045600f, 0.00063614f, 1.41421356f, 1.20710678f, 1.56366296f, 1.52445867f};
 
 struct Bar {
-   double o, h, l, c, v, spread, tvwp, atr18, macd_ema12, macd_ema26, macd_sig;
+   double o, h, l, c, spread, atr18, macd_ema12, macd_ema26, macd_sig;
    ulong time_msc;
 };
 Bar history[200];
 Bar cur_b;
 int ticks_in_bar = 0;
 
-// Shape is now (1, 120, 17) = 2040 floats, but declared as 3D-logical flat array
-float input_data[2040];   // filled as [seq][feat] = input_data[seq*17 + feat]
+// Shape is now (1, 120, 15) = 1800 floats, but declared as 3D-logical flat array
+float input_data[1800];   // filled as [seq][feat] = input_data[seq*15 + feat]
 float output_data[3];
 
 static double tr_buf[18];
@@ -33,8 +33,7 @@ int OnInit() {
       return(INIT_FAILED);
    }
 
-   // ← KEY CHANGE: shape is now (1, 120, 17) to match Mamba input
-   const long in_shape[]  = {1, 120, 17};
+   const long in_shape[]  = {1, 120, 15};
    const long out_shape[] = {1, 3};
    if(!OnnxSetInputShape(onnx_handle, 0, in_shape) ||
       !OnnxSetOutputShape(onnx_handle, 0, out_shape)) {
@@ -61,12 +60,11 @@ void OnTick() {
 
    if(ticks_in_bar == 0) {
       cur_b.o = t.bid; cur_b.h = t.bid; cur_b.l = t.bid;
-      cur_b.v = 0; cur_b.spread = 0; cur_b.time_msc = t.time_msc;
+      cur_b.spread = 0; cur_b.time_msc = t.time_msc;
    }
    cur_b.h = MathMax(cur_b.h, t.bid);
    cur_b.l = MathMin(cur_b.l, t.bid);
    cur_b.c = t.bid;
-   cur_b.v += (t.volume > 0 ? (double)t.volume : 0.01);
    cur_b.spread += (t.ask - t.bid);
    ticks_in_bar++;
 
@@ -102,16 +100,12 @@ void UpdateIndicators(Bar &b) {
    b.macd_ema26 = (b.c - p.macd_ema26) * (2.0 / 27.0) + p.macd_ema26;
    double macd_raw = b.macd_ema12 - b.macd_ema26;
    b.macd_sig = (macd_raw - p.macd_sig) * (2.0 / 10.0) + p.macd_sig;
-
-   double p_sum = 0, v_sum = 0;
-   for(int i = 0; i < 143; i++) { p_sum += (history[i].c * history[i].v); v_sum += history[i].v; }
-   b.tvwp = (p_sum + b.c * b.v) / (v_sum + b.v + 1e-8);
 }
 
 void Predict() {
    for(int i = 0; i < 120; i++) {
       int h = 119 - i;   // oldest bar at i=0, newest at i=119 — matches Python sequence order
-      float f[17];
+      float f[15];
       double cl = history[h].c;
       double utc_h = (double)((history[h].time_msc / 3600000) % 24);
       double utc_d = (double)(((history[h].time_msc / 86400000) + 3) % 7);
@@ -132,13 +126,10 @@ void Predict() {
       f[12] = (float)MathCos(2 * M_PI * utc_h / 24.0);
       f[13] = (float)MathSin(2 * M_PI * utc_d / 7.0);
       f[14] = (float)MathCos(2 * M_PI * utc_d / 7.0);
-      f[15] = (float)MathLog(history[h].v + 1.0);
-      f[16] = (float)((cl - history[h].tvwp) / cl);
 
-      // Write into flat buffer as row-major (seq, feat)
-      for(int k = 0; k < 17; k++) {
+      for(int k = 0; k < 15; k++) {
          float scaled = (f[k] - medians[k]) / iqrs[k];
-         input_data[i * 17 + k] = MathMax(-10.0f, MathMin(10.0f, scaled));
+         input_data[i * 15 + k] = MathMax(-10.0f, MathMin(10.0f, scaled));
       }
    }
 

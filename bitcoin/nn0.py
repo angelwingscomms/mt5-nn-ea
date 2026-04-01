@@ -19,8 +19,8 @@ TARGET_HORIZON = 30 # Bars
 # 1. LOAD & SYMMETRIC LABELING
 df_t = pd.read_csv('bitcoin_ticks.csv')
 df_t['bar_id'] = np.arange(len(df_t)) // TICK_DENSITY
-df = df_t.groupby('bar_id').agg({'bid':['first','max','min','last'], 'vol':'sum', 'time_msc':'first'})
-df.columns = ['open','high','low','close','volume','time_open']
+df = df_t.groupby('bar_id').agg({'bid':['first','max','min','last'], 'time_msc':'first'})
+df.columns = ['open','high','low','close','time_open']
 df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask']-x['bid']).mean()).values
 
 def get_symmetric_labels(df, tp_mult=9, sl_mult=5.4):
@@ -48,7 +48,7 @@ def get_symmetric_labels(df, tp_mult=9, sl_mult=5.4):
         # both or neither → stays 0 (neutral), which is the correct safe label
     return labels
 
-# 2. FEATURE ENGINEERING (17 FEATURES)
+# 2. FEATURE ENGINEERING (15 FEATURES)
 df['dt'] = pd.to_datetime(df['time_open'], unit='ms', utc=True)
 df['f0'] = np.log(df['close'] / df['close'].shift(1))
 df['f1'] = df['spread']
@@ -66,14 +66,11 @@ df['f11'] = np.sin(2 * np.pi * df['dt'].dt.hour / 24)
 df['f12'] = np.cos(2 * np.pi * df['dt'].dt.hour / 24)
 df['f13'] = np.sin(2 * np.pi * df['dt'].dt.dayofweek / 7)
 df['f14'] = np.cos(2 * np.pi * df['dt'].dt.dayofweek / 7)
-df['f15'] = np.log(df['volume'] + 1)
-tvwp = (df['close'] * df['volume']).rolling(144).sum() / (df['volume'].rolling(144).sum() + 1e-8)
-df['f16'] = (df['close'] - tvwp) / df['close']
 
 df.dropna(inplace=True)
 df.reset_index(drop=True, inplace=True)
 df['target'] = get_symmetric_labels(df)
-X = df[[f'f{i}' for i in range(17)]].values
+X = df[[f'f{i}' for i in range(15)]].values
 y = df['target'].values
 
 # 3. ROBUST SCALING
@@ -92,7 +89,7 @@ for i in range(len(X_s)-SEQ_LEN):
 X_seq, y_seq = np.array(X_seq), np.array(y_seq)
 
 # 4. BiMT-TCN MODEL
-def build_bimt_tcn(seq_len=120, n_features=17):
+def build_bimt_tcn(seq_len=120, n_features=15):
     reg = regularizers.l2(1e-4)
     inp = Input(shape=(seq_len * n_features,), name="input")
     x = Reshape((seq_len, n_features))(inp)
@@ -129,16 +126,16 @@ model.compile(optimizer=tf.keras.optimizers.AdamW(1e-3), loss='sparse_categorica
 from sklearn.utils.class_weight import compute_class_weight
 cw = compute_class_weight('balanced', classes=np.array([0, 1, 2]), y=y_seq[:split])
 assert split > 0 and split < len(X_seq), f"Split {split} out of range for X_seq len {len(X_seq)}"
-model.fit(X_seq[:split].reshape(-1, 2040), y_seq[:split], 
-          validation_data=(X_seq[split:].reshape(-1, 2040), y_seq[split:]),
+model.fit(X_seq[:split].reshape(-1, 1800), y_seq[:split], 
+          validation_data=(X_seq[split:].reshape(-1, 1800), y_seq[split:]),
           epochs=54, batch_size=64, class_weight=dict(enumerate(cw)),
           callbacks=[tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)])
 
 # Export
-spec = (tf.TensorSpec((1, 2040), tf.float32, name="input"),)
+spec = (tf.TensorSpec((1, 1800), tf.float32, name="input"),)
 model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec, opset=13)
 with open("bitcoin_144.onnx", "wb") as f: f.write(model_proto.SerializeToString())
 
 print("\n--- PASTE THESE INTO live.mq5 ---")
-print(f"float medians[17] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
-print(f"float iqrs[17] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")
+print(f"float medians[15] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
+print(f"float iqrs[15] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")

@@ -2,11 +2,18 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import torch
-from mamba_ssm import Mamba
+import sys
+from pathlib import Path
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.utils.class_weight import compute_class_weight
 import os
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.append(str(ROOT_DIR))
+
+from shared_mamba import SharedMambaClassifier
 
 torch.manual_seed(42)
 np.random.seed(42)
@@ -19,8 +26,8 @@ TARGET_HORIZON = 30
 # 1. LOAD & BAR CONSTRUCTION
 df_t = pd.read_csv('bitcoin_ticks.csv')
 df_t['bar_id'] = np.arange(len(df_t)) // TICK_DENSITY
-df = df_t.groupby('bar_id').agg({'bid': ['first', 'max', 'min', 'last'], 'vol': 'sum', 'time_msc': 'first'})
-df.columns = ['open', 'high', 'low', 'close', 'volume', 'time_open']
+df = df_t.groupby('bar_id').agg({'bid': ['first', 'max', 'min', 'last'], 'time_msc': 'first'})
+df.columns = ['open', 'high', 'low', 'close', 'time_open']
 df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask'] - x['bid']).mean()).values
 
 # 2. SYMMETRIC LABELING
@@ -54,7 +61,7 @@ def get_symmetric_labels(df, tp_mult=9, sl_mult=5.4):
             labels[i] = 2
     return labels
 
-# 3. FEATURE ENGINEERING (17 FEATURES)
+# 3. FEATURE ENGINEERING (15 FEATURES)
 df['dt'] = pd.to_datetime(df['time_open'], unit='ms', utc=True)
 df['f0'] = np.log(df['close'] / df['close'].shift(1))
 df['f1'] = df['spread']
@@ -72,15 +79,12 @@ df['f11'] = np.sin(2 * np.pi * df['dt'].dt.hour / 24)
 df['f12'] = np.cos(2 * np.pi * df['dt'].dt.hour / 24)
 df['f13'] = np.sin(2 * np.pi * df['dt'].dt.dayofweek / 7)
 df['f14'] = np.cos(2 * np.pi * df['dt'].dt.dayofweek / 7)
-df['f15'] = np.log(df['volume'] + 1)
-tvwp = (df['close'] * df['volume']).rolling(144).sum() / (df['volume'].rolling(144).sum() + 1e-8)
-df['f16'] = (df['close'] - tvwp) / df['close']
 
 df.dropna(inplace=True)
 df.reset_index(drop=True, inplace=True)
 df['target'] = get_symmetric_labels(df)
 
-X = df[[f'f{i}' for i in range(17)]].values
+X = df[[f'f{i}' for i in range(15)]].values
 y = df['target'].values
 
 # 4. ROBUST SCALING (fit on train rows only, no leakage)
@@ -92,12 +96,12 @@ iqr = np.percentile(X[:raw_split], 75, axis=0) - np.percentile(X[:raw_split], 25
 iqr = np.where(iqr < 1e-6, 1.0, iqr)
 X_s = np.clip((X - median) / iqr, -10, 10)
 
-# 5. SEQUENCE CONSTRUCTION — shape (N, SEQ_LEN, 17), label at last bar
+# 5. SEQUENCE CONSTRUCTION — shape (N, SEQ_LEN, 15), label at last bar
 X_seq, y_seq = [], []
 for i in range(len(X_s) - SEQ_LEN):
     X_seq.append(X_s[i:i + SEQ_LEN])
     y_seq.append(y[i + SEQ_LEN - 1])
-X_seq = np.array(X_seq, dtype=np.float32)   # (N, 120, 17)
+X_seq = np.array(X_seq, dtype=np.float32)   # (N, 120, 15)
 y_seq = np.array(y_seq, dtype=np.int64)
 
 assert split > 0 and split < len(X_seq), f"Split {split} out of range for X_seq len {len(X_seq)}"
@@ -113,28 +117,7 @@ train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffl
 val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=256)
 
 # 7. MAMBA MODEL
-class MambaClassifier(nn.Module):
-    def __init__(self, n_features=17, d_state=16, d_conv=4, expand=2, hidden=128, n_classes=3, dropout=0.4):
-        super().__init__()
-        self.mamba = Mamba(
-            d_model=n_features,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand
-        )
-        self.head = nn.Sequential(
-            nn.Linear(n_features, hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, n_classes)
-        )
-
-    def forward(self, x):           # x: (B, 120, 17)
-        x = self.mamba(x)           # (B, 120, 17)
-        x = x.mean(dim=1)           # (B, 17) — global average pool over time
-        return self.head(x)         # (B, 3)
-
-model = MambaClassifier()
+model = SharedMambaClassifier(n_features=15, hidden=128)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 
@@ -174,9 +157,9 @@ for epoch in range(54):
 
 model.load_state_dict(best_state)
 
-# 9. EXPORT TO ONNX — input shape (1, 120, 17)
+# 9. EXPORT TO ONNX — input shape (1, 120, 15)
 model.eval()
-dummy_input = torch.randn(1, SEQ_LEN, 17)
+dummy_input = torch.randn(1, SEQ_LEN, 15)
 torch.onnx.export(
     model,
     dummy_input,
@@ -190,5 +173,5 @@ print("✅ ONNX saved: bitcoin_mamba_144.onnx")
 
 # 10. SCALER VALUES FOR live.mq5
 print("\n--- PASTE THESE INTO live.mq5 ---")
-print(f"float medians[17] = {{{', '.join([f'{v:.8f}f' for v in median])}}};")
-print(f"float iqrs[17] = {{{', '.join([f'{v:.8f}f' for v in iqr])}}};")
+print(f"float medians[15] = {{{', '.join([f'{v:.8f}f' for v in median])}}};")
+print(f"float iqrs[15] = {{{', '.join([f'{v:.8f}f' for v in iqr])}}};")

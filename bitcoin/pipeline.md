@@ -44,54 +44,60 @@ nn.py
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-import tensorflow as tf
-import tf2onnx
+import torch
+from mamba_ssm import Mamba
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.utils.class_weight import compute_class_weight
 import os
-from tensorflow.keras import layers, Model, Input, regularizers
 
-# Architecture Improvements: BiMT-TCN
-from tensorflow.keras.layers import Bidirectional, LSTM, MultiHeadAttention, LayerNormalization, Add, Dense, Dropout, GlobalAveragePooling1D, Reshape
-
-tf.keras.utils.set_random_seed(42)
+torch.manual_seed(42)
+np.random.seed(42)
 
 # --- CONFIG ---
 TICK_DENSITY = 540
 SEQ_LEN = 120
-TARGET_HORIZON = 30 # Bars
+TARGET_HORIZON = 30
 
-# 1. LOAD & SYMMETRIC LABELING
+# 1. LOAD & BAR CONSTRUCTION
 df_t = pd.read_csv('bitcoin_ticks.csv')
 df_t['bar_id'] = np.arange(len(df_t)) // TICK_DENSITY
-df = df_t.groupby('bar_id').agg({'bid':['first','max','min','last'], 'vol':'sum', 'time_msc':'first'})
-df.columns = ['open','high','low','close','volume','time_open']
-df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask']-x['bid']).mean()).values
+df = df_t.groupby('bar_id').agg({'bid': ['first', 'max', 'min', 'last'], 'vol': 'sum', 'time_msc': 'first'})
+df.columns = ['open', 'high', 'low', 'close', 'volume', 'time_open']
+df['spread'] = df_t.groupby('bar_id').apply(lambda x: (x['ask'] - x['bid']).mean()).values
 
+# 2. SYMMETRIC LABELING
 def get_symmetric_labels(df, tp_mult=9, sl_mult=5.4):
     c, hi, lo = df.close.values, df.high.values, df.low.values
     atr = ta.atr(df.high, df.low, df.close, length=18).values
     labels = np.zeros(len(df), dtype=int)
-    for i in range(len(df)-TARGET_HORIZON):
-        if np.isnan(atr[i]): continue
-        b_tp, b_sl = c[i] + (tp_mult*atr[i]), c[i] - (sl_mult*atr[i])
-        s_tp, s_sl = c[i] - (tp_mult*atr[i]), c[i] + (sl_mult*atr[i])
-
+    for i in range(len(df) - TARGET_HORIZON):
+        if np.isnan(atr[i]):
+            continue
+        b_tp, b_sl = c[i] + (tp_mult * atr[i]), c[i] - (sl_mult * atr[i])
+        s_tp, s_sl = c[i] - (tp_mult * atr[i]), c[i] + (sl_mult * atr[i])
         buy_done, sell_done = False, False
-        buy_won,  sell_won  = False, False
-        for j in range(i+1, i+TARGET_HORIZON):
+        buy_won, sell_won = False, False
+        for j in range(i + 1, i + TARGET_HORIZON):
             if not buy_done:
-                if   hi[j] >= b_tp: buy_won  = True;  buy_done  = True
-                elif lo[j] <= b_sl:                    buy_done  = True
+                if hi[j] >= b_tp:
+                    buy_won = True; buy_done = True
+                elif lo[j] <= b_sl:
+                    buy_done = True
             if not sell_done:
-                if   lo[j] <= s_tp: sell_won = True;  sell_done = True
-                elif hi[j] >= s_sl:                    sell_done = True
-            if buy_done and sell_done: break
-
-        if   buy_won and not sell_won: labels[i] = 1
-        elif sell_won and not buy_won: labels[i] = 2
-        # both or neither → stays 0 (neutral), which is the correct safe label
+                if lo[j] <= s_tp:
+                    sell_won = True; sell_done = True
+                elif hi[j] >= s_sl:
+                    sell_done = True
+            if buy_done and sell_done:
+                break
+        if buy_won and not sell_won:
+            labels[i] = 1
+        elif sell_won and not buy_won:
+            labels[i] = 2
     return labels
 
-# 2. FEATURE ENGINEERING (17 FEATURES)
+# 3. FEATURE ENGINEERING (17 FEATURES)
 df['dt'] = pd.to_datetime(df['time_open'], unit='ms', utc=True)
 df['f0'] = np.log(df['close'] / df['close'].shift(1))
 df['f1'] = df['spread']
@@ -101,7 +107,9 @@ df['f4'] = (df[['open', 'close']].min(axis=1) - df['low']) / df['close']
 df['f5'] = (df['high'] - df['low']) / df['close']
 df['f6'] = (df['close'] - df['low']) / (df['high'] - df['low'] + 1e-8)
 m = ta.macd(df['close'], 12, 26, 9)
-df['f7'], df['f8'], df['f9'] = m.iloc[:, 0]/df['close'], m.iloc[:, 2]/df['close'], m.iloc[:, 1]/df['close']
+df['f7'] = m.iloc[:, 0] / df['close']   # MACD line
+df['f8'] = m.iloc[:, 1] / df['close']   # Signal line (MACDs)
+df['f9'] = m.iloc[:, 2] / df['close']   # Histogram (MACDh)
 df['f10'] = ta.atr(df['high'], df['low'], df['close'], length=18) / df['close']
 df['f11'] = np.sin(2 * np.pi * df['dt'].dt.hour / 24)
 df['f12'] = np.cos(2 * np.pi * df['dt'].dt.hour / 24)
@@ -114,81 +122,125 @@ df['f16'] = (df['close'] - tvwp) / df['close']
 df.dropna(inplace=True)
 df.reset_index(drop=True, inplace=True)
 df['target'] = get_symmetric_labels(df)
+
 X = df[[f'f{i}' for i in range(17)]].values
 y = df['target'].values
 
-# 3. ROBUST SCALING
+# 4. ROBUST SCALING (fit on train rows only, no leakage)
 raw_split = int(len(X) * 0.9)
 split = raw_split - SEQ_LEN
-# Fit scaler on ALL training rows, not the sequence-adjusted subset
+
 median = np.median(X[:raw_split], axis=0)
 iqr = np.percentile(X[:raw_split], 75, axis=0) - np.percentile(X[:raw_split], 25, axis=0)
 iqr = np.where(iqr < 1e-6, 1.0, iqr)
 X_s = np.clip((X - median) / iqr, -10, 10)
 
+# 5. SEQUENCE CONSTRUCTION — shape (N, SEQ_LEN, 17), label at last bar
 X_seq, y_seq = [], []
-for i in range(len(X_s)-SEQ_LEN):
-    X_seq.append(X_s[i:i+SEQ_LEN])
-    y_seq.append(y[i+SEQ_LEN-1])
-X_seq, y_seq = np.array(X_seq), np.array(y_seq)
+for i in range(len(X_s) - SEQ_LEN):
+    X_seq.append(X_s[i:i + SEQ_LEN])
+    y_seq.append(y[i + SEQ_LEN - 1])
+X_seq = np.array(X_seq, dtype=np.float32)   # (N, 120, 17)
+y_seq = np.array(y_seq, dtype=np.int64)
 
-# 4. BiMT-TCN MODEL
-def build_bimt_tcn(seq_len=120, n_features=17):
-    reg = regularizers.l2(1e-4)
-    inp = Input(shape=(seq_len * n_features,), name="input")
-    x = Reshape((seq_len, n_features))(inp)
-
-    # Level 1: Bidirectional Context
-    x = Bidirectional(LSTM(64, return_sequences=True, kernel_regularizer=reg))(x)
-    
-    # Level 2: Deep Causal TCN (Dilation coverage: 1,2,4,8,16 = 31 steps receptive field)
-    for d in [1, 2, 4, 8, 16]:
-        shortcut = x
-        x = layers.Conv1D(128, 3, padding='causal', dilation_rate=d, activation='relu', kernel_regularizer=reg)(x)
-        x = LayerNormalization()(x)
-        x = layers.Conv1D(128, 3, padding='causal', dilation_rate=d, activation='relu', kernel_regularizer=reg)(x)
-        x = LayerNormalization()(x)
-        if shortcut.shape[-1] != x.shape[-1]:
-            shortcut = layers.Conv1D(128, 1, padding='same')(shortcut)
-        x = Add()([shortcut, x])
-
-    # Level 3: Transformer Attention
-    attn = MultiHeadAttention(num_heads=4, key_dim=32)(x, x)
-    x = Add()([x, attn])
-    x = LayerNormalization()(x)
-
-    x = GlobalAveragePooling1D()(x)
-    x = Dense(128, activation='relu', kernel_regularizer=reg)(x)
-    x = Dropout(0.4)(x)
-    out = Dense(3, activation='softmax', name="output")(x)
-    return Model(inp, out)
-
-model = build_bimt_tcn()
-model.compile(optimizer=tf.keras.optimizers.AdamW(1e-3), loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-
-# Train with Class Weights
-from sklearn.utils.class_weight import compute_class_weight
-cw = compute_class_weight('balanced', classes=np.array([0, 1, 2]), y=y_seq[:split])
 assert split > 0 and split < len(X_seq), f"Split {split} out of range for X_seq len {len(X_seq)}"
-model.fit(X_seq[:split].reshape(-1, 2040), y_seq[:split], 
-          validation_data=(X_seq[split:].reshape(-1, 2040), y_seq[split:]),
-          epochs=54, batch_size=64, class_weight=dict(enumerate(cw)),
-          callbacks=[tf.keras.callbacks.EarlyStopping(patience=10, restore_best_weights=True)])
 
-# Export
-spec = (tf.TensorSpec((1, 2040), tf.float32, name="input"),)
-model_proto, _ = tf2onnx.convert.from_keras(model, input_signature=spec, opset=13)
-with open("bitcoin_144.onnx", "wb") as f: f.write(model_proto.SerializeToString())
+# 6. PYTORCH DATASETS
+X_train, y_train = torch.from_numpy(X_seq[:split]), torch.from_numpy(y_seq[:split])
+X_val,   y_val   = torch.from_numpy(X_seq[split:]), torch.from_numpy(y_seq[split:])
 
+cw = compute_class_weight('balanced', classes=np.array([0, 1, 2]), y=y_seq[:split])
+class_weights = torch.tensor(cw, dtype=torch.float32)
+
+train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)
+val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=256)
+
+# 7. MAMBA MODEL
+class MambaClassifier(nn.Module):
+    def __init__(self, n_features=17, d_state=16, d_conv=4, expand=2, hidden=128, n_classes=3, dropout=0.4):
+        super().__init__()
+        self.mamba = Mamba(
+            d_model=n_features,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand
+        )
+        self.head = nn.Sequential(
+            nn.Linear(n_features, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, n_classes)
+        )
+
+    def forward(self, x):           # x: (B, 120, 17)
+        x = self.mamba(x)           # (B, 120, 17)
+        x = x.mean(dim=1)           # (B, 17) — global average pool over time
+        return self.head(x)         # (B, 3)
+
+model = MambaClassifier()
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+# 8. TRAINING WITH EARLY STOPPING
+best_val_loss = float('inf')
+patience, wait = 10, 0
+best_state = None
+
+for epoch in range(54):
+    model.train()
+    for xb, yb in train_loader:
+        out = model(xb)
+        loss = criterion(out, yb)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # Validation
+    model.eval()
+    val_losses = []
+    with torch.no_grad():
+        for xb, yb in val_loader:
+            out = model(xb)
+            val_losses.append(criterion(out, yb).item())
+    val_loss = np.mean(val_losses)
+    print(f"Epoch {epoch:02d} | val_loss: {val_loss:.4f}")
+
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        wait = 0
+    else:
+        wait += 1
+        if wait >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
+
+model.load_state_dict(best_state)
+
+# 9. EXPORT TO ONNX — input shape (1, 120, 17)
+model.eval()
+dummy_input = torch.randn(1, SEQ_LEN, 17)
+torch.onnx.export(
+    model,
+    dummy_input,
+    "bitcoin_mamba_144.onnx",
+    input_names=["input"],
+    output_names=["output"],
+    opset_version=13,
+    dynamic_axes={"input": {0: "batch"}}
+)
+print("✅ ONNX saved: bitcoin_mamba_144.onnx")
+
+# 10. SCALER VALUES FOR live.mq5
 print("\n--- PASTE THESE INTO live.mq5 ---")
-print(f"float medians[17] = {{{', '.join([f'{m:.8f}f' for m in median])}}};")
-print(f"float iqrs[17] = {{{', '.join([f'{s:.8f}f' for s in iqr])}}};")
+print(f"float medians[17] = {{{', '.join([f'{v:.8f}f' for v in median])}}};")
+print(f"float iqrs[17] = {{{', '.join([f'{v:.8f}f' for v in iqr])}}};")
 ```
 
 live.mq5
 ```cpp
 ﻿#include <Trade\Trade.mqh>
-#resource "\\Experts\\nn\\bitcoin\\bitcoin_144.onnx" as uchar model_buffer[]
+#resource "\\Experts\\nn\\bitcoin\\bitcoin_mamba_144.onnx" as uchar model_buffer[]
 
 input int TICK_DENSITY = 54;
 input double SL_MULTIPLIER = 5.4;
@@ -197,18 +249,23 @@ long onnx_handle = INVALID_HANDLE;
 CTrade trade;
 
 // PASTE FROM PYTHON OUTPUT
-float medians[17] = {0.00000000f, 27.00000000f, 70.73900000f, 0.00012056f, 0.00012359f, 0.00068856f, 0.50000000f, -0.00000263f, -0.00000316f, -0.00000581f, 0.00071232f, 0.00000000f, -0.00000000f, 0.00000000f, -0.22252093f, 0.89199804f, 0.00026568f};
-float iqrs[17] = {0.00065647f, 0.03472222f, 30.58600000f, 0.00020881f, 0.00021586f, 0.00048541f, 0.62345182f, 0.00075497f, 0.00072372f, 0.00021932f, 0.00032388f, 1.41421356f, 1.41421356f, 1.56366296f, 1.52445867f, 1.00000000f, 0.00450346f};
+float medians[17] = {-0.00000439f, 27.00000000f, 268.29100000f, 0.00028073f, 0.00029178f, 0.00140701f, 0.50154799f, 0.00007258f, 0.00006459f, -0.00001585f, 0.00149410f, 0.00000000f, -0.25881905f, 0.00000000f, -0.22252093f, 1.85629799f, 0.00108218f};
+float iqrs[17] = {0.00130049f, 0.04936111f, 109.56350000f, 0.00043169f, 0.00045235f, 0.00090441f, 0.59345870f, 0.00143933f, 0.00135949f, 0.00045600f, 0.00063614f, 1.41421356f, 1.20710678f, 1.56366296f, 1.52445867f, 1.00000000f, 0.01014560f};
 
-struct Bar { 
-   double o, h, l, c, v, spread, tvwp, atr18, macd_ema12, macd_ema26, macd_sig; 
-   ulong time_msc; 
+struct Bar {
+   double o, h, l, c, v, spread, tvwp, atr18, macd_ema12, macd_ema26, macd_sig;
+   ulong time_msc;
 };
 Bar history[200];
 Bar cur_b;
 int ticks_in_bar = 0;
-float input_data[2040];
+
+// Shape is now (1, 120, 17) = 2040 floats, but declared as 3D-logical flat array
+float input_data[2040];   // filled as [seq][feat] = input_data[seq*17 + feat]
 float output_data[3];
+
+static double tr_buf[18];
+static int    tr_buf_n = 0;
 
 int OnInit() {
    onnx_handle = OnnxCreateFromBuffer(model_buffer, ONNX_DEFAULT);
@@ -216,7 +273,9 @@ int OnInit() {
       Print("[FATAL] OnnxCreateFromBuffer failed: ", GetLastError());
       return(INIT_FAILED);
    }
-   const long in_shape[] = {1, 2040};
+
+   // ← KEY CHANGE: shape is now (1, 120, 17) to match Mamba input
+   const long in_shape[]  = {1, 120, 17};
    const long out_shape[] = {1, 3};
    if(!OnnxSetInputShape(onnx_handle, 0, in_shape) ||
       !OnnxSetOutputShape(onnx_handle, 0, out_shape)) {
@@ -225,6 +284,11 @@ int OnInit() {
       onnx_handle = INVALID_HANDLE;
       return(INIT_FAILED);
    }
+
+   // Reset static indicator state on each EA start
+   tr_buf_n = 0;
+   ArrayInitialize(tr_buf, 0);
+
    return(INIT_SUCCEEDED);
 }
 
@@ -233,13 +297,16 @@ void OnDeinit(const int reason) {
 }
 
 void OnTick() {
-   MqlTick t; 
+   MqlTick t;
    if(!SymbolInfoTick(_Symbol, t)) return;
-   
+
    if(ticks_in_bar == 0) {
-      cur_b.o = t.bid; cur_b.h = t.bid; cur_b.l = t.bid; cur_b.v = 0; cur_b.spread = 0; cur_b.time_msc = t.time_msc;
+      cur_b.o = t.bid; cur_b.h = t.bid; cur_b.l = t.bid;
+      cur_b.v = 0; cur_b.spread = 0; cur_b.time_msc = t.time_msc;
    }
-   cur_b.h = MathMax(cur_b.h, t.bid); cur_b.l = MathMin(cur_b.l, t.bid); cur_b.c = t.bid;
+   cur_b.h = MathMax(cur_b.h, t.bid);
+   cur_b.l = MathMin(cur_b.l, t.bid);
+   cur_b.c = t.bid;
    cur_b.v += (t.volume > 0 ? (double)t.volume : 0.01);
    cur_b.spread += (t.ask - t.bid);
    ticks_in_bar++;
@@ -247,18 +314,12 @@ void OnTick() {
    if(ticks_in_bar >= TICK_DENSITY) {
       cur_b.spread /= TICK_DENSITY;
       UpdateIndicators(cur_b);
-      for(int i=199; i>0; i--) history[i] = history[i-1];
+      for(int i = 199; i > 0; i--) history[i] = history[i-1];
       history[0] = cur_b;
       ticks_in_bar = 0;
-      if(history[120].c > 0) Predict();  // h goes up to 119; h+1 = 120 is the deepest access
+      if(history[120].c > 0) Predict();
    }
 }
-
-// Add to Bar struct: int bar_count;  (initialise to 0 in OnInit / cold-start branch)
-// Requires a small ring buffer for TR accumulation – shown inline below.
-
-static double tr_buf[18];
-static int    tr_buf_n = 0;
 
 void UpdateIndicators(Bar &b) {
    Bar p = history[0];
@@ -266,57 +327,62 @@ void UpdateIndicators(Bar &b) {
       b.macd_ema12 = b.c; b.macd_ema26 = b.c; b.macd_sig = 0;
       double tr0 = b.h - b.l;
       tr_buf[0] = tr0; tr_buf_n = 1;
-      b.atr18 = tr0;   // will be replaced once 18 TRs are collected
+      b.atr18 = tr0;
       return;
    }
-   double tr = MathMax(b.h-b.l, MathMax(MathAbs(b.h-p.c), MathAbs(b.l-p.c)));
+   double tr = MathMax(b.h - b.l, MathMax(MathAbs(b.h - p.c), MathAbs(b.l - p.c)));
    if(tr_buf_n < 18) {
       tr_buf[tr_buf_n++] = tr;
-      // Seed phase: use plain SMA, matching pandas_ta initialisation
       double sum = 0;
       for(int k = 0; k < tr_buf_n; k++) sum += tr_buf[k];
       b.atr18 = sum / tr_buf_n;
    } else {
-      // Wilder smoothing — identical to pandas_ta after the seed window
       b.atr18 = (tr - p.atr18) / 18.0 + p.atr18;
    }
-   b.macd_ema12 = (b.c - p.macd_ema12)*(2.0/13.0) + p.macd_ema12;
-   b.macd_ema26 = (b.c - p.macd_ema26)*(2.0/27.0) + p.macd_ema26;
+   b.macd_ema12 = (b.c - p.macd_ema12) * (2.0 / 13.0) + p.macd_ema12;
+   b.macd_ema26 = (b.c - p.macd_ema26) * (2.0 / 27.0) + p.macd_ema26;
    double macd_raw = b.macd_ema12 - b.macd_ema26;
-   b.macd_sig = (macd_raw - p.macd_sig)*(2.0/10.0) + p.macd_sig;
-   
-   double p_sum=0, v_sum=0;
-   for(int i=0; i<143; i++) { p_sum+=(history[i].c*history[i].v); v_sum+=history[i].v; }
-   b.tvwp = (p_sum + b.c*b.v)/(v_sum + b.v + 1e-8);
+   b.macd_sig = (macd_raw - p.macd_sig) * (2.0 / 10.0) + p.macd_sig;
+
+   double p_sum = 0, v_sum = 0;
+   for(int i = 0; i < 143; i++) { p_sum += (history[i].c * history[i].v); v_sum += history[i].v; }
+   b.tvwp = (p_sum + b.c * b.v) / (v_sum + b.v + 1e-8);
 }
 
 void Predict() {
-   for(int i=0; i<120; i++) {
-      int h = 119 - i;
+   for(int i = 0; i < 120; i++) {
+      int h = 119 - i;   // oldest bar at i=0, newest at i=119 — matches Python sequence order
       float f[17];
       double cl = history[h].c;
-      // DOW FIX: Thursday is 3 in Python's dayofweek
       double utc_h = (double)((history[h].time_msc / 3600000) % 24);
       double utc_d = (double)(((history[h].time_msc / 86400000) + 3) % 7);
 
-      f[0]=(float)MathLog(cl/history[h+1].c); f[1]=(float)history[h].spread;
-      f[2]=(float)((history[h].time_msc - history[h+1].time_msc)/1000.0);
-      f[3]=(float)((history[h].h-MathMax(history[h].o,cl))/cl);
-      f[4]=(float)((MathMin(history[h].o,cl)-history[h].l)/cl);
-      f[5]=(float)((history[h].h-history[h].l)/cl);
-      f[6]=(float)((cl-history[h].l)/(history[h].h-history[h].l+1e-8));
+      f[0]  = (float)MathLog(cl / history[h+1].c);
+      f[1]  = (float)history[h].spread;
+      f[2]  = (float)((history[h].time_msc - history[h+1].time_msc) / 1000.0);
+      f[3]  = (float)((history[h].h - MathMax(history[h].o, cl)) / cl);
+      f[4]  = (float)((MathMin(history[h].o, cl) - history[h].l) / cl);
+      f[5]  = (float)((history[h].h - history[h].l) / cl);
+      f[6]  = (float)((cl - history[h].l) / (history[h].h - history[h].l + 1e-8));
       double macd = history[h].macd_ema12 - history[h].macd_ema26;
-      f[7]=(float)(macd/cl); f[8]=(float)(history[h].macd_sig/cl); f[9]=(float)((macd-history[h].macd_sig)/cl);
-      f[10]=(float)(history[h].atr18/cl);
-      f[11]=(float)MathSin(2*M_PI*utc_h/24.0); f[12]=(float)MathCos(2*M_PI*utc_h/24.0);
-      f[13]=(float)MathSin(2*M_PI*utc_d/7.0); f[14]=(float)MathCos(2*M_PI*utc_d/7.0);
-      f[15]=(float)MathLog(history[h].v + 1.0); f[16]=(float)((cl-history[h].tvwp)/cl);
+      f[7]  = (float)(macd / cl);
+      f[8]  = (float)(history[h].macd_sig / cl);
+      f[9]  = (float)((macd - history[h].macd_sig) / cl);
+      f[10] = (float)(history[h].atr18 / cl);
+      f[11] = (float)MathSin(2 * M_PI * utc_h / 24.0);
+      f[12] = (float)MathCos(2 * M_PI * utc_h / 24.0);
+      f[13] = (float)MathSin(2 * M_PI * utc_d / 7.0);
+      f[14] = (float)MathCos(2 * M_PI * utc_d / 7.0);
+      f[15] = (float)MathLog(history[h].v + 1.0);
+      f[16] = (float)((cl - history[h].tvwp) / cl);
 
-      for(int k=0; k<17; k++) {
+      // Write into flat buffer as row-major (seq, feat)
+      for(int k = 0; k < 17; k++) {
          float scaled = (f[k] - medians[k]) / iqrs[k];
-         input_data[i*17+k] = MathMax(-10.0f, MathMin(10.0f, scaled)); // CLIPPING FIX
+         input_data[i * 17 + k] = MathMax(-10.0f, MathMin(10.0f, scaled));
       }
    }
+
    if(OnnxRun(onnx_handle, ONNX_DEFAULT, input_data, output_data)) {
       int sig = ArrayMaximum(output_data);
       if(sig > 0 && output_data[sig] > 0.72) Execute(sig);
@@ -325,16 +391,15 @@ void Predict() {
 
 void Execute(int sig) {
    if(PositionSelect(_Symbol)) return;
-   double p   = (sig==1) ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID);
-   double sl  = (sig==1) ? (p - history[0].atr18*SL_MULTIPLIER) : (p + history[0].atr18*SL_MULTIPLIER);
-   double tp  = (sig==1) ? (p + history[0].atr18*TP_MULTIPLIER)  : (p - history[0].atr18*TP_MULTIPLIER);
-   
-   // NEW: validate stops are non-degenerate
+   double p  = (sig == 1) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl = (sig == 1) ? (p - history[0].atr18 * SL_MULTIPLIER) : (p + history[0].atr18 * SL_MULTIPLIER);
+   double tp = (sig == 1) ? (p + history[0].atr18 * TP_MULTIPLIER) : (p - history[0].atr18 * TP_MULTIPLIER);
+
    double min_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
    if(MathAbs(p - sl) < min_dist || MathAbs(tp - p) < min_dist) {
       Print("[WARN] Stop/TP too close to price, skipping trade.");
       return;
    }
-   trade.PositionOpen(_Symbol,(sig==1?ORDER_TYPE_BUY:ORDER_TYPE_SELL),0.72,p,sl,tp);
+   trade.PositionOpen(_Symbol, (sig == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL), 0.72, p, sl, tp);
 }
 ```
