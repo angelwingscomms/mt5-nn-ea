@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -820,7 +821,7 @@ def main() -> None:
     best_val_loss = float("inf")
     wait = 0
 
-    for epoch in range(args.epochs):
+    for epoch in tqdm(range(args.epochs), desc="Training"):
         model.train()
         train_losses = []
         for xb, yb in train_loader:
