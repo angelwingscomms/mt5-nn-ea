@@ -20,10 +20,11 @@
 #define WARMUP_BARS 9
 #define REQUIRED_HISTORY_INDEX (SEQ_LEN + RETURN_PERIOD - 1)
 
-#define IMBALANCE_MIN_TICKS 18
-#define IMBALANCE_EMA_SPAN 18
+// Fixed time-bar size shared by gold/nn.py and gold/live.mq5.
+// Set this to 27 or 9 (or another positive value) to retune the bar duration.
+#define PRIMARY_BAR_SECONDS 27
 
-// Fixed stop/target distance in absolute price units, used when the trainer runs with -r
+// Fixed stop/target distance in absolute price units, used when the trainer runs with -i
 // and when live.mq5 input R is true.
 #define DEFAULT_FIXED_MOVE 0.54
 

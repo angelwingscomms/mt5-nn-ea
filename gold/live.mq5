@@ -10,6 +10,7 @@
 
 #define INPUT_BUFFER_SIZE (SEQ_LEN * MODEL_FEATURE_COUNT)
 #define HISTORY_SIZE (REQUIRED_HISTORY_INDEX + 1)
+#define PRIMARY_BAR_MILLISECONDS ((ulong)PRIMARY_BAR_SECONDS * 1000)
 
 input bool R = (MODEL_USE_ATR_RISK == 0);
 input double FIXED_MOVE = DEFAULT_FIXED_MOVE;
@@ -39,11 +40,11 @@ Bar history[HISTORY_SIZE];
 Bar current_bar;
 int ticks_in_bar = 0;
 bool bar_started = false;
+ulong current_bar_bucket = 0;
 ulong last_tick_time = 0;
 double tick_imbalance_sum = 0.0;
 double last_bid = 0.0;
 int last_sign = 1;
-double primary_expected_abs_theta = 60.0;
 int warmup_count = 0;
 double warmup_sum_feature = 0.0;
 double warmup_sum_trade = 0.0;
@@ -62,10 +63,12 @@ int closed_loss_count = 0;
 double realized_pnl = 0.0;
 
 int UpdateTickSign(double bid);
-void ProcessTick(MqlTick &tick);
+ulong BarBucket(ulong time_msc);
+ulong BarOpenTime(ulong bar_bucket);
+void StartBar(MqlTick &tick, ulong bar_bucket);
+bool RollBarIfNeeded(ulong next_bar_bucket, int &closed_tick_count);
+void ProcessTick(MqlTick &tick, ulong bar_bucket);
 void UpdateIndicators(Bar &bar);
-bool ShouldClosePrimaryBar(double &observed_abs_theta);
-void UpdatePrimaryImbalanceThreshold(double observed_abs_theta);
 void CloseBar();
 void LoadHistory();
 float ScaleAndClip(float value, int feature_index);
@@ -110,15 +113,13 @@ int OnInit() {
 
    ArrayInitialize(input_data, 0.0f);
    trade.SetExpertMagicNumber(MAGIC_NUMBER);
-   primary_expected_abs_theta = MathMax(2.0, (double)MathMax(2, IMBALANCE_MIN_TICKS / 3));
    DebugPrint(
       StringFormat(
-         "init seq=%d horizon=%d history=%d imbalance_min_ticks=%d imbalance_span=%d risk_mode=%s fixed_move=%.2f sl=%.2f tp=%.2f lot=%.2f primary_conf=%.2f",
+         "init seq=%d horizon=%d history=%d bar_seconds=%d risk_mode=%s fixed_move=%.2f sl=%.2f tp=%.2f lot=%.2f primary_conf=%.2f",
          SEQ_LEN,
          TARGET_HORIZON,
          REQUIRED_HISTORY_INDEX,
-         IMBALANCE_MIN_TICKS,
-         IMBALANCE_EMA_SPAN,
+         PRIMARY_BAR_SECONDS,
          (R ? "FIXED" : "ATR"),
          FIXED_MOVE,
          SL_MULTIPLIER,
@@ -194,6 +195,42 @@ string SignalName(int signal) {
    return "HOLD";
 }
 
+ulong BarBucket(ulong time_msc) {
+   return time_msc / PRIMARY_BAR_MILLISECONDS;
+}
+
+ulong BarOpenTime(ulong bar_bucket) {
+   return bar_bucket * PRIMARY_BAR_MILLISECONDS;
+}
+
+void StartBar(MqlTick &tick, ulong bar_bucket) {
+   current_bar.o = tick.bid;
+   current_bar.h = tick.bid;
+   current_bar.l = tick.bid;
+   current_bar.c = tick.bid;
+   current_bar.spread = tick.ask - tick.bid;
+   current_bar.tick_imbalance = 0.0;
+   current_bar.atr_feature = 0.0;
+   current_bar.atr_trade = 0.0;
+   current_bar.time_msc = BarOpenTime(bar_bucket);
+   current_bar.valid = false;
+   ticks_in_bar = 0;
+   tick_imbalance_sum = 0.0;
+   current_bar_bucket = bar_bucket;
+   bar_started = true;
+}
+
+bool RollBarIfNeeded(ulong next_bar_bucket, int &closed_tick_count) {
+   closed_tick_count = 0;
+   if(!bar_started || next_bar_bucket == current_bar_bucket) {
+      return false;
+   }
+
+   closed_tick_count = ticks_in_bar;
+   CloseBar();
+   return true;
+}
+
 double StopDistance() {
    if(R) {
       return FIXED_MOVE;
@@ -248,22 +285,13 @@ int UpdateTickSign(double bid) {
    return sign;
 }
 
-void ProcessTick(MqlTick &tick) {
+void ProcessTick(MqlTick &tick, ulong bar_bucket) {
    if(tick.bid <= 0.0) {
       return;
    }
 
    if(!bar_started) {
-      current_bar.o = tick.bid;
-      current_bar.h = tick.bid;
-      current_bar.l = tick.bid;
-      current_bar.c = tick.bid;
-      current_bar.spread = tick.ask - tick.bid;
-      current_bar.tick_imbalance = 0.0;
-      current_bar.time_msc = tick.time_msc;
-      ticks_in_bar = 0;
-      tick_imbalance_sum = 0.0;
-      bar_started = true;
+      StartBar(tick, bar_bucket);
    }
 
    int tick_sign = UpdateTickSign(tick.bid);
@@ -302,26 +330,6 @@ void UpdateIndicators(Bar &bar) {
    bar.valid = (warmup_count >= WARMUP_BARS);
 }
 
-bool ShouldClosePrimaryBar(double &observed_abs_theta) {
-   if(ticks_in_bar < IMBALANCE_MIN_TICKS) {
-      observed_abs_theta = 0.0;
-      return false;
-   }
-
-   observed_abs_theta = MathAbs(tick_imbalance_sum);
-   return (observed_abs_theta >= primary_expected_abs_theta);
-}
-
-void UpdatePrimaryImbalanceThreshold(double observed_abs_theta) {
-   if(observed_abs_theta <= 0.0) {
-      return;
-   }
-
-   double alpha = 2.0 / (MathMax(1, IMBALANCE_EMA_SPAN) + 1.0);
-   double observed = MathMax(2.0, observed_abs_theta);
-   primary_expected_abs_theta = (1.0 - alpha) * primary_expected_abs_theta + alpha * observed;
-}
-
 void CloseBar() {
    current_bar.tick_imbalance = tick_imbalance_sum / MathMax(1, ticks_in_bar);
    UpdateIndicators(current_bar);
@@ -333,6 +341,7 @@ void CloseBar() {
 
    ticks_in_bar = 0;
    tick_imbalance_sum = 0.0;
+   current_bar_bucket = 0;
    bar_started = false;
 }
 
@@ -348,20 +357,14 @@ void OnTick() {
          continue;
       }
 
-      ProcessTick(ticks[i]);
-      last_tick_time = ticks[i].time_msc;
-
-      double observed_abs_theta = 0.0;
-      if(ShouldClosePrimaryBar(observed_abs_theta)) {
-         int closed_tick_count = ticks_in_bar;
-         CloseBar();
-         UpdatePrimaryImbalanceThreshold(observed_abs_theta);
+      ulong tick_bucket = BarBucket(ticks[i].time_msc);
+      int closed_tick_count = 0;
+      if(RollBarIfNeeded(tick_bucket, closed_tick_count)) {
          DebugPrint(
             StringFormat(
-               "bar closed ticks=%d theta=%.2f next_threshold=%.2f atr_trade=%.5f close=%.5f",
+               "bar closed seconds=%d ticks=%d atr_trade=%.5f close=%.5f",
+               PRIMARY_BAR_SECONDS,
                closed_tick_count,
-               observed_abs_theta,
-               primary_expected_abs_theta,
                history[0].atr_trade,
                history[0].c
             )
@@ -377,6 +380,9 @@ void OnTick() {
             );
          }
       }
+
+      ProcessTick(ticks[i], tick_bucket);
+      last_tick_time = ticks[i].time_msc;
    }
 }
 
@@ -398,14 +404,11 @@ void LoadHistory() {
          continue;
       }
 
-      ProcessTick(ticks[i]);
+      ulong tick_bucket = BarBucket(ticks[i].time_msc);
+      int closed_tick_count = 0;
+      RollBarIfNeeded(tick_bucket, closed_tick_count);
+      ProcessTick(ticks[i], tick_bucket);
       last_tick_time = ticks[i].time_msc;
-
-      double observed_abs_theta = 0.0;
-      if(ShouldClosePrimaryBar(observed_abs_theta)) {
-         CloseBar();
-         UpdatePrimaryImbalanceThreshold(observed_abs_theta);
-      }
    }
 }
 

@@ -84,8 +84,8 @@ TARGET_ATR_PERIOD = int(SHARED["TARGET_ATR_PERIOD"])
 RV_PERIOD = int(SHARED["RV_PERIOD"])
 RETURN_PERIOD = int(SHARED["RETURN_PERIOD"])
 WARMUP_BARS = int(SHARED["WARMUP_BARS"])
-IMBALANCE_MIN_TICKS = int(SHARED["IMBALANCE_MIN_TICKS"])
-IMBALANCE_EMA_SPAN = int(SHARED["IMBALANCE_EMA_SPAN"])
+PRIMARY_BAR_SECONDS = int(SHARED["PRIMARY_BAR_SECONDS"])
+BAR_DURATION_MS = PRIMARY_BAR_SECONDS * 1000
 DEFAULT_FIXED_MOVE = float(SHARED["DEFAULT_FIXED_MOVE"])
 LABEL_SL_MULTIPLIER = float(SHARED["LABEL_SL_MULTIPLIER"])
 LABEL_TP_MULTIPLIER = float(SHARED["LABEL_TP_MULTIPLIER"])
@@ -132,8 +132,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=DEFAULT_PATIENCE, help="Early stopping patience.")
     parser.add_argument("--device", type=str, default="", help="Optional torch device override.")
     parser.add_argument(
+        "-i",
+        "--use-fixed-stops",
         "-r",
         "--use-fixed-risk",
+        dest="use_fixed_stops",
         action="store_true",
         help="Use fixed label stops/targets. Without this flag, training labels use ATR-based barriers.",
     )
@@ -265,28 +268,10 @@ def wilder_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -
     return pd.Series(atr, index=close.index, dtype=np.float64)
 
 
-def build_primary_bar_ids(df_ticks: pd.DataFrame) -> np.ndarray:
-    prices = df_ticks["bid"].to_numpy(dtype=np.float64, copy=False)
-    tick_signs = compute_tick_signs(prices)
-    alpha = 2.0 / (max(1, IMBALANCE_EMA_SPAN) + 1.0)
-    expected_abs_theta = max(2.0, float(max(2, IMBALANCE_MIN_TICKS // 3)))
-    bar_ids = np.empty(len(prices), dtype=np.int64)
-    current_bar = 0
-    ticks_in_bar = 0
-    theta = 0.0
-
-    for i, sign in enumerate(tick_signs):
-        bar_ids[i] = current_bar
-        ticks_in_bar += 1
-        theta += float(sign)
-        if ticks_in_bar >= IMBALANCE_MIN_TICKS and abs(theta) >= expected_abs_theta:
-            observed = max(2.0, abs(theta))
-            expected_abs_theta = (1.0 - alpha) * expected_abs_theta + alpha * observed
-            current_bar += 1
-            ticks_in_bar = 0
-            theta = 0.0
-
-    return bar_ids
+def build_time_bar_buckets(time_msc: np.ndarray) -> np.ndarray:
+    if PRIMARY_BAR_SECONDS <= 0:
+        raise ValueError("PRIMARY_BAR_SECONDS must be positive.")
+    return time_msc // BAR_DURATION_MS
 
 
 def build_gold_bars(csv_path: Path) -> pd.DataFrame:
@@ -299,28 +284,37 @@ def build_gold_bars(csv_path: Path) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"No ticks found in {csv_path}")
 
-    df["bar_id"] = build_primary_bar_ids(df)
+    df["bar_bucket"] = build_time_bar_buckets(df["time_msc"].to_numpy(dtype=np.int64, copy=False))
     df["tick_sign"] = compute_tick_signs(df["bid"].to_numpy(dtype=np.float64, copy=False))
     df["spread"] = df["ask"] - df["bid"]
 
     grouped = (
-        df.groupby("bar_id")
+        df.groupby("bar_bucket", sort=True)
         .agg(
             open=("bid", "first"),
             high=("bid", "max"),
             low=("bid", "min"),
             close=("bid", "last"),
-            time_open=("time_msc", "first"),
-            time_close=("time_msc", "last"),
+            first_tick_time=("time_msc", "first"),
+            last_tick_time=("time_msc", "last"),
             tick_count=("bid", "size"),
             tick_imbalance=("tick_sign", "mean"),
             ask_high=("ask", "max"),
             ask_low=("ask", "min"),
             spread=("spread", "last"),
         )
-        .reset_index(drop=True)
+        .reset_index()
     )
-    log.info("Built %d gold bars in %.2fs", len(grouped), time.time() - t0)
+    grouped["time_open"] = grouped["bar_bucket"] * BAR_DURATION_MS
+    grouped["time_close"] = grouped["time_open"] + BAR_DURATION_MS
+    grouped.insert(0, "bar_id", np.arange(len(grouped), dtype=np.int64))
+    grouped = grouped.drop(columns=["bar_bucket"])
+    log.info(
+        "Built %d gold bars in %.2fs using fixed %ds bars",
+        len(grouped),
+        time.time() - t0,
+        PRIMARY_BAR_SECONDS,
+    )
     return grouped
 
 
@@ -637,8 +631,7 @@ def write_diagnostics(
         "## Shared Config",
         f"- seq_len: {SEQ_LEN}",
         f"- target_horizon: {TARGET_HORIZON}",
-        f"- imbalance_min_ticks: {IMBALANCE_MIN_TICKS}",
-        f"- imbalance_ema_span: {IMBALANCE_EMA_SPAN}",
+        f"- primary_bar_seconds: {PRIMARY_BAR_SECONDS}",
         f"- feature_atr_period: {FEATURE_ATR_PERIOD}",
         f"- target_atr_period: {TARGET_ATR_PERIOD}",
         f"- rv_period: {RV_PERIOD}",
@@ -695,7 +688,7 @@ def write_diagnostics(
         "- shared_config_snapshot.mqh",
         "",
         "## Note",
-        "- Imbalance bars are variable by design. Lowering imbalance_min_ticks makes them smaller on average, but it does not force a fixed tick count per bar.",
+        f"- Bars are fixed-duration time buckets aligned to epoch time. Change PRIMARY_BAR_SECONDS in gold_shared_config.mqh to retune them, for example to 27 or 9 seconds.",
         "- In ATR mode, labels use the stricter label_sl_multiplier and label_tp_multiplier values, so a BUY/SELL label means price reached the target before making more than a tiny adverse move.",
         "- In fixed mode, labels use the same DEFAULT_FIXED_MOVE distance for both stop loss and take profit.",
         "- When use_all_windows is 0, the trainer evenly subsamples window endpoints down to the max_train_windows and max_eval_windows caps to keep runs fast.",
@@ -730,7 +723,9 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(42)
     np.random.seed(42)
-    use_atr_risk = not bool(args.use_fixed_risk)
+    use_atr_risk = not bool(args.use_fixed_stops)
+    if PRIMARY_BAR_SECONDS <= 0:
+        raise ValueError("PRIMARY_BAR_SECONDS must be positive.")
     if DEFAULT_FIXED_MOVE <= 0.0:
         raise ValueError("DEFAULT_FIXED_MOVE must be positive.")
 
@@ -743,7 +738,7 @@ def main() -> None:
     log.info("Using device: %s", device)
     log.info(
         "Shared config | seq_len=%d horizon=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
-        "imbalance_min_ticks=%d imbalance_ema_span=%d risk_mode=%s fixed_move=%.2f "
+        "bar_seconds=%d risk_mode=%s fixed_move=%.2f "
         "label_sl=%.2f label_tp=%.2f exec_sl=%.2f exec_tp=%.2f use_all_windows=%d",
         SEQ_LEN,
         TARGET_HORIZON,
@@ -751,8 +746,7 @@ def main() -> None:
         TARGET_ATR_PERIOD,
         RV_PERIOD,
         RETURN_PERIOD,
-        IMBALANCE_MIN_TICKS,
-        IMBALANCE_EMA_SPAN,
+        PRIMARY_BAR_SECONDS,
         "ATR" if use_atr_risk else "FIXED",
         DEFAULT_FIXED_MOVE,
         LABEL_SL_MULTIPLIER,
