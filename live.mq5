@@ -1,8 +1,11 @@
 #include <Trade\Trade.mqh>
-#include "models/last_model/shared_config.mqh"
-#include "models/last_model/model_config.mqh"
-
-#resource "\\Experts\\trade-bot\\models\\last_model\\model.onnx" as uchar model_buffer[]
+// @active-model-reference begin
+#define ACTIVE_MODEL_SYMBOL "BTCUSD"
+#define ACTIVE_MODEL_VERSION "06_04_2026-13_06__33"
+#include "models/BTCUSD/06_04_2026-13_06__33/diagnostics/shared_config_snapshot.mqh"
+#include "models/BTCUSD/06_04_2026-13_06__33/diagnostics/model_config_snapshot.mqh"
+#resource "models\\BTCUSD\\06_04_2026-13_06__33\\model.onnx" as uchar model_buffer[]
+// @active-model-reference end
 
 #ifndef MODEL_USE_ATR_RISK
 #define MODEL_USE_ATR_RISK 1
@@ -25,8 +28,6 @@ input double RISK_PERCENT = DEFAULT_RISK_PERCENT;
 input double LOT_MIN = DEFAULT_LOT_MIN;
 input int MAGIC_NUMBER = 777777;
 input bool DEBUG_LOG = true;
-input bool LAST_MODEL = true;
-input string MODEL_DATETIME = "";    // Format: DD_MM_YYYY-HH_MM__SS, e.g., "04_04_2026-18_20__08". Leave empty if LAST_MODEL=true.
 
 long onnx_handle = INVALID_HANDLE;
 CTrade trade;
@@ -102,16 +103,7 @@ double CalculateTradeVolume(int signal, double price, double sl);
 void PrintRunSummary();
 
 int OnInit() {
-   // Validate model selection parameters
-   if(!LAST_MODEL && MODEL_DATETIME == "") {
-      Print("[FATAL] LAST_MODEL is false but MODEL_DATETIME is empty. Provide MODEL_DATETIME in format DD_MM_YYYY-HH_MM__SS.");
-      return INIT_FAILED;
-   }
-   if(LAST_MODEL && MODEL_DATETIME != "") {
-      DebugPrint("LAST_MODEL=true, ignoring provided MODEL_DATETIME: " + MODEL_DATETIME);
-   }
-   string model_selector = LAST_MODEL ? "LAST_MODEL" : ("MODEL_DATETIME=" + MODEL_DATETIME);
-   DebugPrint("Model selector: " + model_selector);
+   DebugPrint("Model reference: " + ACTIVE_MODEL_SYMBOL + "/" + ACTIVE_MODEL_VERSION);
 
    onnx_handle = OnnxCreateFromBuffer(model_buffer, ONNX_DEFAULT);
    if(onnx_handle == INVALID_HANDLE) {

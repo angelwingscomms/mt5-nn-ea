@@ -13,13 +13,11 @@ from pathlib import Path
 from model_archive import (
     ACTIVE_DIAGNOSTICS_DIR,
     ACTIVE_MODEL_CONFIG_PATH,
-    ACTIVE_ONNX_PATH,
     ACTIVE_SHARED_CONFIG_PATH,
     DEFAULT_METAEDITOR_PATH,
     activate_model,
     compile_live_expert,
     configured_symbol,
-    deploy_to_last_model,
     ensure_default_test_config,
     format_model_stamp,
     load_define_file,
@@ -147,6 +145,13 @@ def filter_days(days: list[date], from_date: str, to_date: str) -> list[date]:
             continue
         filtered.append(day_value)
     return filtered
+
+
+def parse_single_day(value: str) -> date:
+    text = value.strip()
+    if not re.fullmatch(r"\d{6}", text):
+        raise ValueError("Daily test dates must use DDMMYY format, for example 050426.")
+    return datetime.strptime(text, "%d%m%y").date()
 
 
 def bool_literal(value: bool) -> str:
@@ -305,7 +310,7 @@ def write_csv(path: Path, rows: list[BacktestResult]) -> None:
             writer.writerow(row.__dict__)
 
 
-def write_report(path: Path, month_start: date, rows: list[BacktestResult]) -> None:
+def write_report(path: Path, scope_label: str, rows: list[BacktestResult], daily_mode: bool) -> None:
     total_profit = sum(row.profit for row in rows)
     profitable_days = sum(1 for row in rows if row.profit > 0.0)
     losing_days = sum(1 for row in rows if row.profit < 0.0)
@@ -319,7 +324,7 @@ def write_report(path: Path, month_start: date, rows: list[BacktestResult]) -> N
     lines = [
         "# Daily Backtest Report",
         "",
-        f"- month: {month_start.strftime('%Y-%m')}",
+        f"- {'day' if daily_mode else 'month'}: {scope_label}",
         f"- days_tested: {len(rows)}",
         f"- profitable_days: {profitable_days}",
         f"- losing_days: {losing_days}",
@@ -457,6 +462,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--month", type=str, default="", help="Month in YYYY-MM format. Defaults to config or last month.")
     parser.add_argument("--from-date", type=str, default="", help="Optional first day to run, in YYYY-MM-DD.")
     parser.add_argument("--to-date", type=str, default="", help="Optional last day to run, in YYYY-MM-DD.")
+    parser.add_argument(
+        "-d",
+        "--day",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DDMMYY",
+        help="Run a single-day backtest. Optionally pass DDMMYY; if omitted, it defaults to the previous day.",
+    )
     parser.add_argument("--deposit", type=float, default=None, help="Initial deposit for each daily test.")
     parser.add_argument("--currency", type=str, default="", help="Deposit currency.")
     parser.add_argument("--leverage", type=str, default="", help="Tester leverage, for example 1:2000.")
@@ -500,16 +514,15 @@ def main() -> None:
     )
 
     activate_model(model_dir)
-    deploy_to_last_model(
-        onnx_path=ACTIVE_ONNX_PATH,
-        model_config_path=ACTIVE_MODEL_CONFIG_PATH,
-        shared_config_path=ACTIVE_SHARED_CONFIG_PATH,
-        diagnostics_dir=ACTIVE_DIAGNOSTICS_DIR,
-        tests_dir=model_tests_dir(model_dir),
-    )
+
+    daily_mode = args.day is not None
+    single_day = None
+    if daily_mode:
+        single_day = parse_single_day(args.day) if args.day else (date.today() - timedelta(days=1))
 
     run_stamp = format_model_stamp()
-    run_dir = model_tests_dir(model_dir) / run_stamp
+    run_dir_name = f"{run_stamp} d" if daily_mode else run_stamp
+    run_dir = model_tests_dir(model_dir) / run_dir_name
     config_dir = run_dir / "configs"
     raw_log_dir = run_dir / "raw_logs"
     compile_dir = run_dir / "compile"
@@ -527,13 +540,20 @@ def main() -> None:
 
     shared = load_define_file(SHARED_CONFIG_PATH)
     model = load_define_file(MODEL_CONFIG_PATH)
-    month_value = str(test_config["month"]) or None
-    month_start, month_end = parse_month(month_value)
-    day_values = filter_days(
-        iter_days(month_start, month_end),
-        str(test_config["from_date"]),
-        str(test_config["to_date"]),
-    )
+    if daily_mode:
+        if single_day is None:
+            raise RuntimeError("Daily mode failed to resolve a test date.")
+        report_scope = single_day.isoformat()
+        day_values = [single_day]
+    else:
+        month_value = str(test_config["month"]) or None
+        month_start, month_end = parse_month(month_value)
+        report_scope = month_start.strftime("%Y-%m")
+        day_values = filter_days(
+            iter_days(month_start, month_end),
+            str(test_config["from_date"]),
+            str(test_config["to_date"]),
+        )
 
     set_name = f"{sanitize_symbol(str(test_config['symbol']))}_daily_backtest_{run_stamp}.set"
     set_path = runtime.tester_profile_dir / set_name
@@ -618,10 +638,10 @@ def main() -> None:
 
         rows.append(day_result)
         write_csv(run_dir / "daily_results.csv", rows)
-        write_report(run_dir / "report.md", month_start=month_start, rows=rows)
+        write_report(run_dir / "report.md", scope_label=report_scope, rows=rows, daily_mode=daily_mode)
 
     write_csv(run_dir / "daily_results.csv", rows)
-    write_report(run_dir / "report.md", month_start=month_start, rows=rows)
+    write_report(run_dir / "report.md", scope_label=report_scope, rows=rows, daily_mode=daily_mode)
     print(run_dir)
 
 

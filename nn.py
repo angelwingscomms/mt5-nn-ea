@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 try:
     from tqdm import tqdm
@@ -20,13 +20,13 @@ except ModuleNotFoundError:
     def tqdm(iterable, **_kwargs):
         return iterable
 
-from mamba_lite import MambaLiteClassifier
+from mamba_lite import CastorClassifier, MambaLiteClassifier
 from minirocket_classifier import (
     MiniRocketClassifier,
     MiniRocketMultiAttentionHead,
     fit_minirocket,
-    transform_sequence_tokens,
     transform_sequences,
+    transform_sequence_tokens,
 )
 from model_archive import (
     ACTIVE_DIAGNOSTICS_DIR,
@@ -35,11 +35,11 @@ from model_archive import (
     ACTIVE_SHARED_CONFIG_PATH,
     DEFAULT_METAEDITOR_PATH,
     compile_live_expert,
-    deploy_to_last_model,
     ensure_default_test_config,
     format_model_stamp,
     load_define_file,
     read_text_best_effort,
+    set_live_model_reference,
     symbol_models_dir,
     sync_directory_contents,
 )
@@ -66,7 +66,9 @@ DEFAULT_MINIROCKET_LR = 1e-4
 DEFAULT_MAMBA_WEIGHT_DECAY = 1e-4
 DEFAULT_MINIROCKET_WEIGHT_DECAY = 0.0
 DEFAULT_MINIROCKET_ATTENTION_DIM = 128
-DEFAULT_MINIROCKET_ATTENTION_HEADS = 4
+DEFAULT_ATTENTION_HEADS = 4
+DEFAULT_ATTENTION_LAYERS = 2
+DEFAULT_ATTENTION_DROPOUT = 0.1
 DEFAULT_CONFIDENCE_SEARCH_MIN = 0.40
 DEFAULT_CONFIDENCE_SEARCH_MAX = 0.99
 DEFAULT_CONFIDENCE_SEARCH_STEPS = 60
@@ -161,29 +163,62 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Build, train, and compile using fixed-time bars instead of the default imbalance bars.",
     )
-    parser.add_argument(
-        "-me",
+    architecture_group = parser.add_mutually_exclusive_group()
+    architecture_group.add_argument(
+        "-m",
         "--use-minirocket-encoder",
         action="store_true",
         help="Use the MiniRocket multivariate encoder instead of the default Mamba-lite model.",
+    )
+    architecture_group.add_argument(
+        "-c",
+        "--use-castor-encoder",
+        action="store_true",
+        help="Use the Castor temporal encoder instead of the default Mamba-lite model.",
+    )
+    parser.add_argument(
+        "-a",
+        "--use-multihead-attention",
+        action="store_true",
+        help="Add a lightweight multihead-attention head to the selected encoder.",
     )
     parser.add_argument(
         "--minirocket-features",
         type=int,
         default=DEFAULT_MINIROCKET_FEATURES,
-        help="Approximate number of MiniRocket PPV features to use when -me is enabled.",
+        help="Approximate number of MiniRocket PPV features to use when -m is enabled.",
     )
     parser.add_argument(
+        "--attention-dim",
         "--minirocket-attention-dim",
+        dest="attention_dim",
         type=int,
         default=DEFAULT_MINIROCKET_ATTENTION_DIM,
-        help="Hidden size for the MiniRocket multiattention head.",
+        help="Projection size for MiniRocket's attention head when -m -a is enabled.",
     )
     parser.add_argument(
+        "--attention-heads",
         "--minirocket-attention-heads",
+        dest="attention_heads",
         type=int,
-        default=DEFAULT_MINIROCKET_ATTENTION_HEADS,
-        help="Number of attention heads in the MiniRocket multiattention head.",
+        default=DEFAULT_ATTENTION_HEADS,
+        help="Number of attention heads used when -a is enabled.",
+    )
+    parser.add_argument(
+        "--attention-layers",
+        "--minirocket-attention-layers",
+        dest="attention_layers",
+        type=int,
+        default=DEFAULT_ATTENTION_LAYERS,
+        help="Number of stacked residual attention blocks used when -a is enabled.",
+    )
+    parser.add_argument(
+        "--attention-dropout",
+        "--minirocket-attention-dropout",
+        dest="attention_dropout",
+        type=float,
+        default=DEFAULT_ATTENTION_DROPOUT,
+        help="Dropout used inside the attention head when -a is enabled.",
     )
     parser.add_argument(
         "--metaeditor-path",
@@ -206,7 +241,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="auto",
         choices=("auto", "focal", "cross-entropy"),
-        help="Loss for classifier training. 'auto' uses focal for Mamba and cross-entropy for MiniRocket.",
+        help="Loss for classifier training. 'auto' uses focal for every architecture.",
     )
     parser.add_argument(
         "--lr",
@@ -251,6 +286,14 @@ def parse_args() -> argparse.Namespace:
         help="Number of threshold candidates to evaluate when selecting PRIMARY_CONFIDENCE.",
     )
     return parser.parse_args()
+
+
+def resolve_architecture(args: argparse.Namespace) -> str:
+    if args.use_minirocket_encoder:
+        return "minirocket"
+    if args.use_castor_encoder:
+        return "castor"
+    return "mamba"
 
 
 def resolve_local_path(path_str: str) -> Path:
@@ -335,14 +378,27 @@ def build_time_bar_ids(time_msc: np.ndarray) -> np.ndarray:
 def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> pd.DataFrame:
     t0 = time.time()
     chunks = []
-    for chunk in pd.read_csv(
-        csv_path,
-        usecols=["time_msc", "bid", "ask"],
-        dtype={"time_msc": np.int64, "bid": np.float64, "ask": np.float64},
-        chunksize=50000,
-    ):
-        chunks.append(chunk)
-    df = pd.concat(chunks, ignore_index=True).sort_values("time_msc").reset_index(drop=True)
+    read_csv_kwargs = {
+        "filepath_or_buffer": csv_path,
+        "usecols": ["time_msc", "bid", "ask"],
+        "dtype": {"time_msc": np.int64, "bid": np.float64, "ask": np.float64},
+        "chunksize": 50000,
+    }
+    try:
+        for chunk in pd.read_csv(**read_csv_kwargs):
+            chunks.append(chunk)
+    except pd.errors.ParserError as exc:
+        if "out of memory" not in str(exc).lower():
+            raise
+        log.warning("Default CSV parser ran out of memory for %s; retrying with engine=python.", csv_path)
+        chunks.clear()
+        for chunk in pd.read_csv(**read_csv_kwargs, engine="python"):
+            chunks.append(chunk)
+    df = pd.concat(chunks, ignore_index=True)
+    if not df["time_msc"].is_monotonic_increasing:
+        df = df.sort_values("time_msc").reset_index(drop=True)
+    else:
+        df = df.reset_index(drop=True)
     if df.empty:
         raise ValueError(f"No ticks found in {csv_path}")
 
@@ -543,6 +599,13 @@ def make_class_weights(labels: np.ndarray) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
+def make_sample_weights(labels: np.ndarray) -> torch.Tensor:
+    class_weights = make_class_weights(labels).to(torch.float64).numpy()
+    sample_weights = class_weights[labels.astype(np.int64)]
+    sample_weights /= max(sample_weights.mean(), 1e-12)
+    return torch.tensor(sample_weights, dtype=torch.double)
+
+
 class FocalLoss(nn.Module):
     def __init__(self, alpha: torch.Tensor | None = None, gamma: float = 2.0):
         super().__init__()
@@ -565,11 +628,26 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
-def make_loader(x: np.ndarray, y: np.ndarray, batch_size: int, shuffle: bool) -> DataLoader:
+def make_loader(
+    x: np.ndarray,
+    y: np.ndarray,
+    batch_size: int,
+    shuffle: bool,
+    sample_weights: torch.Tensor | None = None,
+) -> DataLoader:
+    dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
+    sampler = None
+    if sample_weights is not None:
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
     return DataLoader(
-        TensorDataset(torch.from_numpy(x), torch.from_numpy(y)),
+        dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
     )
 
 
@@ -754,6 +832,7 @@ def write_diagnostics(
     use_fixed_time_bars: bool,
     symbol: str,
     model_backend: str,
+    loss_mode: str,
     focal_gamma: float,
     model_config_text: str,
 ) -> None:
@@ -788,6 +867,7 @@ def write_diagnostics(
         "## Run",
         f"- symbol: {symbol}",
         f"- backend: {model_backend}",
+        f"- loss_mode: {loss_mode}",
         f"- focal_gamma: {focal_gamma:.2f}",
         "",
         "## Shared Config",
@@ -888,7 +968,8 @@ def build_mql_config(
     primary_confidence: float,
     use_atr_risk: bool,
     use_fixed_time_bars: bool,
-    use_minirocket: bool,
+    architecture: str,
+    use_multihead_attention: bool,
 ) -> str:
     return "\n".join(
         [
@@ -896,7 +977,10 @@ def build_mql_config(
             "// Shared static values live in shared_config.mqh.",
             f"#define MODEL_USE_ATR_RISK {1 if use_atr_risk else 0}",
             f"#define MODEL_USE_FIXED_TIME_BARS {1 if use_fixed_time_bars else 0}",
-            f"#define MODEL_USE_MINIROCKET {1 if use_minirocket else 0}",
+            f'#define MODEL_ARCHITECTURE "{architecture}"',
+            f"#define MODEL_USE_MINIROCKET {1 if architecture == 'minirocket' else 0}",
+            f"#define MODEL_USE_CASTOR {1 if architecture == 'castor' else 0}",
+            f"#define MODEL_USE_MULTIHEAD_ATTENTION {1 if use_multihead_attention else 0}",
             f"#define PRIMARY_CONFIDENCE {primary_confidence:.8f}",
             f"float medians[MODEL_FEATURE_COUNT] = {{{format_float_array(median)}}};",
             f"float iqrs[MODEL_FEATURE_COUNT] = {{{format_float_array(iqr)}}};",
@@ -904,10 +988,10 @@ def build_mql_config(
     )
 
 
-def resolve_loss_mode(use_minirocket: bool, requested_mode: str) -> str:
+def resolve_loss_mode(_architecture: str, requested_mode: str) -> str:
     if requested_mode != "auto":
         return requested_mode
-    return "cross-entropy" if use_minirocket else "focal"
+    return "focal"
 
 
 def main() -> None:
@@ -915,6 +999,8 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(42)
     np.random.seed(42)
+    architecture = resolve_architecture(args)
+    use_multihead_attention = bool(args.use_multihead_attention)
     use_atr_risk = not bool(args.use_fixed_risk)
     use_fixed_time_bars = bool(args.use_fixed_time_bars)
     if use_fixed_time_bars and PRIMARY_BAR_SECONDS <= 0:
@@ -957,9 +1043,10 @@ def main() -> None:
         int(USE_ALL_WINDOWS),
     )
     log.info(
-        "Run config | symbol=%s architecture=%s focal_gamma=%.2f",
+        "Run config | symbol=%s architecture=%s attention=%d focal_gamma=%.2f",
         SYMBOL,
-        "MINIROCKET" if args.use_minirocket_encoder else "MAMBA_LITE",
+        architecture.upper(),
+        int(use_multihead_attention),
         args.focal_gamma,
     )
 
@@ -1011,54 +1098,91 @@ def main() -> None:
     x_test, y_test = build_windows(x_scaled, y, test_end_idx, SEQ_LEN)
     log.info("Window counts | train=%d val=%d test=%d", len(x_train), len(x_val), len(x_test))
 
-    loss_mode = resolve_loss_mode(args.use_minirocket_encoder, args.loss_mode)
+    loss_mode = resolve_loss_mode(architecture, args.loss_mode)
     scheduler = None
     export_model: nn.Module | None = None
+    feature_mean: np.ndarray | None = None
+    feature_std: np.ndarray | None = None
+    token_mean: np.ndarray | None = None
+    token_std: np.ndarray | None = None
+    minirocket_parameters = None
+    train_sample_weights = make_sample_weights(y_train)
 
-    if args.use_minirocket_encoder:
+    if architecture == "minirocket":
         transform_batch_size = max(args.batch_size, DEFAULT_BATCH_SIZE)
         minirocket_parameters = fit_minirocket(
             x_train.transpose(0, 2, 1),
             num_features=args.minirocket_features,
             seed=42,
         )
-        train_tokens = transform_sequence_tokens(
-            minirocket_parameters,
-            x_train,
-            batch_size=transform_batch_size,
-            device=device,
-        )
-        val_tokens = transform_sequence_tokens(
-            minirocket_parameters,
-            x_val,
-            batch_size=transform_batch_size,
-            device=device,
-        )
-        test_tokens = transform_sequence_tokens(
-            minirocket_parameters,
-            x_test,
-            batch_size=transform_batch_size,
-            device=device,
-        )
-
-        token_mean = train_tokens.mean(axis=0).astype(np.float32)
-        token_std = np.where(train_tokens.std(axis=0) < 1e-6, 1.0, train_tokens.std(axis=0)).astype(np.float32)
-        train_tokens -= token_mean
-        train_tokens /= token_std
-        val_tokens -= token_mean
-        val_tokens /= token_std
-        test_tokens -= token_mean
-        test_tokens /= token_std
-
-        training_model = MiniRocketMultiAttentionHead(
-            num_tokens=train_tokens.shape[1],
-            token_dim=train_tokens.shape[2],
-            n_classes=len(LABEL_NAMES),
-            model_dim=args.minirocket_attention_dim,
-            num_heads=args.minirocket_attention_heads,
-        ).to(device)
         learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MINIROCKET_LR
         weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MINIROCKET_WEIGHT_DECAY
+
+        if use_multihead_attention:
+            train_inputs = transform_sequence_tokens(
+                minirocket_parameters,
+                x_train,
+                batch_size=transform_batch_size,
+                device=device,
+            )
+            val_inputs = transform_sequence_tokens(
+                minirocket_parameters,
+                x_val,
+                batch_size=transform_batch_size,
+                device=device,
+            )
+            test_inputs = transform_sequence_tokens(
+                minirocket_parameters,
+                x_test,
+                batch_size=transform_batch_size,
+                device=device,
+            )
+
+            token_mean = train_inputs.mean(axis=0).astype(np.float32)
+            token_std = np.where(train_inputs.std(axis=0) < 1e-6, 1.0, train_inputs.std(axis=0)).astype(np.float32)
+            train_inputs = ((train_inputs - token_mean) / token_std).astype(np.float32, copy=False)
+            val_inputs = ((val_inputs - token_mean) / token_std).astype(np.float32, copy=False)
+            test_inputs = ((test_inputs - token_mean) / token_std).astype(np.float32, copy=False)
+
+            training_model = MiniRocketMultiAttentionHead(
+                num_tokens=train_inputs.shape[1],
+                token_dim=train_inputs.shape[2],
+                n_classes=len(LABEL_NAMES),
+                model_dim=args.attention_dim,
+                num_heads=args.attention_heads,
+                num_layers=args.attention_layers,
+                dropout=args.attention_dropout,
+            ).to(device)
+            model_backend = "minirocket-multivariate-attention"
+        else:
+            train_inputs = transform_sequences(
+                minirocket_parameters,
+                x_train,
+                batch_size=transform_batch_size,
+                device=device,
+            )
+            val_inputs = transform_sequences(
+                minirocket_parameters,
+                x_val,
+                batch_size=transform_batch_size,
+                device=device,
+            )
+            test_inputs = transform_sequences(
+                minirocket_parameters,
+                x_test,
+                batch_size=transform_batch_size,
+                device=device,
+            )
+
+            feature_mean = train_inputs.mean(axis=0).astype(np.float32)
+            feature_std = np.where(train_inputs.std(axis=0) < 1e-6, 1.0, train_inputs.std(axis=0)).astype(np.float32)
+            train_inputs = ((train_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
+            val_inputs = ((val_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
+            test_inputs = ((test_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
+
+            training_model = nn.Linear(train_inputs.shape[1], len(LABEL_NAMES)).to(device)
+            model_backend = "minirocket-multivariate"
+
         optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -1066,26 +1190,52 @@ def main() -> None:
             min_lr=1e-8,
             patience=max(1, args.patience // 2),
         )
-        train_loader = make_loader(train_tokens, y_train, args.batch_size, shuffle=True)
+        train_loader = make_loader(
+            train_inputs,
+            y_train,
+            args.batch_size,
+            shuffle=True,
+            sample_weights=train_sample_weights,
+        )
         val_loader = make_loader(
-            val_tokens,
+            val_inputs,
             y_val,
             max(args.batch_size, DEFAULT_BATCH_SIZE),
             shuffle=False,
         )
         test_loader = make_loader(
-            test_tokens,
+            test_inputs,
             y_test,
             max(args.batch_size, DEFAULT_BATCH_SIZE),
             shuffle=False,
         )
-        model_backend = "minirocket-multivariate-attention"
     else:
         learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MAMBA_LR
         weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MAMBA_WEIGHT_DECAY
-        training_model = MambaLiteClassifier(n_features=MODEL_FEATURE_COUNT).to(device)
+        if architecture == "castor":
+            training_model = CastorClassifier(
+                n_features=MODEL_FEATURE_COUNT,
+                use_multihead_attention=use_multihead_attention,
+                attention_heads=args.attention_heads,
+                attention_layers=args.attention_layers,
+                attention_dropout=args.attention_dropout,
+            ).to(device)
+        else:
+            training_model = MambaLiteClassifier(
+                n_features=MODEL_FEATURE_COUNT,
+                use_multihead_attention=use_multihead_attention,
+                attention_heads=args.attention_heads,
+                attention_layers=args.attention_layers,
+                attention_dropout=args.attention_dropout,
+            ).to(device)
         optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        train_loader = make_loader(x_train, y_train, args.batch_size, shuffle=True)
+        train_loader = make_loader(
+            x_train,
+            y_train,
+            args.batch_size,
+            shuffle=True,
+            sample_weights=train_sample_weights,
+        )
         val_loader = make_loader(
             x_val,
             y_val,
@@ -1100,13 +1250,13 @@ def main() -> None:
         )
         model_backend = getattr(training_model, "backend_name", "portable-mamba-lite")
 
+    class_weights = make_class_weights(y_train).to(device)
     if loss_mode == "cross-entropy":
-        criterion: nn.Module = nn.CrossEntropyLoss().to(device)
+        criterion: nn.Module = nn.CrossEntropyLoss(weight=class_weights).to(device)
     else:
-        class_weights = make_class_weights(y_train).to(device)
         criterion = FocalLoss(alpha=class_weights, gamma=args.focal_gamma).to(device)
     log.info(
-        "Optimization | loss=%s lr=%.6g weight_decay=%.6g confidence_search=[%.2f, %.2f]x%d",
+        "Optimization | loss=%s lr=%.6g weight_decay=%.6g balanced_sampling=1 confidence_search=[%.2f, %.2f]x%d",
         loss_mode,
         learning_rate,
         weight_decay,
@@ -1204,16 +1354,29 @@ def main() -> None:
             deployed_primary_confidence,
         )
 
-    if args.use_minirocket_encoder:
-        export_model = MiniRocketClassifier(
-            parameters=minirocket_parameters,
-            n_classes=len(LABEL_NAMES),
-            token_mean=token_mean,
-            token_std=token_std,
-            head_type="multiattention",
-            attention_dim=args.minirocket_attention_dim,
-            attention_heads=args.minirocket_attention_heads,
-        )
+    if architecture == "minirocket":
+        if minirocket_parameters is None:
+            raise RuntimeError("MiniRocket export requested without fitted parameters.")
+        if use_multihead_attention:
+            export_model = MiniRocketClassifier(
+                parameters=minirocket_parameters,
+                n_classes=len(LABEL_NAMES),
+                token_mean=token_mean,
+                token_std=token_std,
+                head_type="multiattention",
+                attention_dim=args.attention_dim,
+                attention_heads=args.attention_heads,
+                attention_layers=args.attention_layers,
+                attention_dropout=args.attention_dropout,
+            )
+        else:
+            export_model = MiniRocketClassifier(
+                parameters=minirocket_parameters,
+                feature_mean=feature_mean,
+                feature_std=feature_std,
+                n_classes=len(LABEL_NAMES),
+                head_type="linear",
+            )
         export_model.head.load_state_dict(training_model.state_dict())
     else:
         export_model = training_model
@@ -1230,19 +1393,21 @@ def main() -> None:
     export_model.eval()
     export_model.to("cpu")
     dummy = torch.randn(1, SEQ_LEN, MODEL_FEATURE_COUNT)
-    export_target_path = archive_output_path if archive_only else active_output_path
     torch.onnx.export(
         export_model,
         dummy,
-        str(export_target_path),
+        str(archive_output_path),
         input_names=["input"],
         output_names=["output"],
         opset_version=14,
         dynamo=False,
     )
-    should_copy_to_output = output_path != export_target_path and (not archive_only or output_path != ACTIVE_ONNX_PATH)
+    if not archive_only:
+        shutil.copy2(archive_output_path, active_output_path)
+    primary_output_path = archive_output_path if archive_only else active_output_path
+    should_copy_to_output = output_path not in {archive_output_path, active_output_path}
     if should_copy_to_output:
-        shutil.copy2(export_target_path, output_path)
+        shutil.copy2(primary_output_path, output_path)
 
     model_config_text = (
         build_mql_config(
@@ -1251,7 +1416,8 @@ def main() -> None:
             primary_confidence=deployed_primary_confidence,
             use_atr_risk=use_atr_risk,
             use_fixed_time_bars=use_fixed_time_bars,
-            use_minirocket=args.use_minirocket_encoder,
+            architecture=architecture,
+            use_multihead_attention=use_multihead_attention,
         )
         + "\n"
     )
@@ -1286,24 +1452,16 @@ def main() -> None:
         use_fixed_time_bars=use_fixed_time_bars,
         symbol=SYMBOL,
         model_backend=model_backend,
+        loss_mode=loss_mode,
         focal_gamma=args.focal_gamma,
         model_config_text=model_config_text,
     )
     if not archive_only:
         sync_directory_contents(model_diagnostics_dir, ACTIVE_DIAGNOSTICS_DIR)
     ensure_default_test_config(model_test_dir, symbol=SYMBOL)
-    
+
     if not archive_only:
-        # Deploy to models/last_model/ for live.mq5 to reference
-        model_config_snapshot = model_diagnostics_dir / "model_config_snapshot.mqh"
-        shared_config_snapshot = model_diagnostics_dir / "shared_config_snapshot.mqh"
-        deploy_to_last_model(
-            onnx_path=model_dir / "model.onnx",
-            model_config_path=model_config_snapshot,
-            shared_config_path=shared_config_snapshot,
-            diagnostics_dir=model_diagnostics_dir,
-            tests_dir=model_test_dir,
-        )
+        set_live_model_reference(model_dir)
 
     if not archive_only and not args.skip_live_compile:
         runtime_paths = resolve_mt5_runtime(metaeditor_path_override=args.metaeditor_path)
@@ -1330,45 +1488,6 @@ def main() -> None:
         log.info("Saved config to %s", config_path)
     log.info("Saved diagnostics to %s", model_diagnostics_dir)
     log.info("Archived model artifacts to %s", model_dir)
-
-    if not archive_only:
-        # Create/update last_model symlink for this symbol
-        symbol_models = symbol_models_dir(SYMBOL)
-        last_model_link = symbol_models / "last_model"
-        if last_model_link.exists() or last_model_link.is_symlink():
-            try:
-                if last_model_link.is_symlink():
-                    last_model_link.unlink()
-                else:
-                    import shutil as shutil_module
-                    shutil_module.rmtree(last_model_link)
-            except Exception as e:
-                log.warning("Could not remove old last_model link/directory: %s", e)
-        
-        try:
-            # Create a symbolic link from last_model to the current model directory
-            last_model_link.symlink_to(model_dir, target_is_directory=True)
-            log.info("Created last_model symlink: %s -> %s", last_model_link, model_dir)
-        except OSError as e:
-            # Fall back to copying files if symlink fails (Windows sometimes needs admin)
-            log.warning("Symlink creation failed (%s), copying files instead", e)
-            try:
-                last_model_link.mkdir(parents=True, exist_ok=True)
-                for item in ["model.onnx", "diagnostics", "tests"]:
-                    src = model_dir / item
-                    dst = last_model_link / item
-                    if src.exists():
-                        if src.is_dir():
-                            if dst.exists():
-                                import shutil as shutil_module
-                                shutil_module.rmtree(dst)
-                            shutil.copytree(src, dst)
-                        else:
-                            shutil.copy2(src, dst)
-                log.info("Copied model files to last_model directory: %s", last_model_link)
-            except Exception as e:
-                log.error("Failed to create last_model backup: %s", e)
-    
     log.info("Total runtime: %.2fs", time.time() - t0)
 
 

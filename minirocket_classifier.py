@@ -321,6 +321,8 @@ class MiniRocketMultiAttentionHead(nn.Module):
         n_classes: int = 3,
         model_dim: int = 128,
         num_heads: int = 4,
+        num_layers: int = 2,
+        dropout: float = 0.1,
     ):
         super().__init__()
         if num_tokens <= 0:
@@ -329,6 +331,8 @@ class MiniRocketMultiAttentionHead(nn.Module):
             raise ValueError("MiniRocketMultiAttentionHead requires token_dim > 0.")
         if num_heads <= 0:
             raise ValueError("MiniRocketMultiAttentionHead requires num_heads > 0.")
+        if num_layers <= 0:
+            raise ValueError("MiniRocketMultiAttentionHead requires num_layers > 0.")
 
         self.num_tokens = int(num_tokens)
         self.token_dim = int(token_dim)
@@ -336,24 +340,69 @@ class MiniRocketMultiAttentionHead(nn.Module):
         self.model_dim = max(self.num_heads, int(model_dim))
         if self.model_dim % self.num_heads != 0:
             self.model_dim += self.num_heads - (self.model_dim % self.num_heads)
-        self.head_dim = self.model_dim // self.num_heads
-        self.scale = self.head_dim ** -0.5
 
         self.token_projection = nn.Linear(self.token_dim, self.model_dim)
         self.position_embedding = nn.Parameter(torch.zeros(1, self.num_tokens, self.model_dim))
+        self.input_dropout = nn.Dropout(dropout)
+        self.layers = nn.ModuleList(
+            MiniRocketAttentionBlock(
+                model_dim=self.model_dim,
+                num_heads=self.num_heads,
+                dropout=dropout,
+            )
+            for _ in range(int(num_layers))
+        )
+        self.pool_projection = nn.Linear(self.model_dim, 1)
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(self.model_dim * 2),
+            nn.Linear(self.model_dim * 2, self.model_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.model_dim, n_classes),
+        )
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim != 3:
+            raise ValueError("MiniRocketMultiAttentionHead expects [batch, tokens, token_dim] input.")
+
+        x = self.input_dropout(self.token_projection(tokens) + self.position_embedding[:, : tokens.shape[1]])
+        for layer in self.layers:
+            x = layer(x)
+        pool_weights = torch.softmax(self.pool_projection(x).squeeze(-1), dim=-1)
+        pooled = torch.sum(x * pool_weights.unsqueeze(-1), dim=1)
+        summary = x.mean(dim=1)
+        return self.classifier(torch.cat([pooled, summary], dim=1))
+
+
+class MiniRocketAttentionBlock(nn.Module):
+    def __init__(
+        self,
+        model_dim: int,
+        num_heads: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.num_heads = int(num_heads)
+        self.model_dim = max(self.num_heads, int(model_dim))
+        if self.model_dim % self.num_heads != 0:
+            self.model_dim += self.num_heads - (self.model_dim % self.num_heads)
+        self.head_dim = self.model_dim // self.num_heads
+        self.scale = self.head_dim ** -0.5
+
         self.norm1 = nn.LayerNorm(self.model_dim)
         self.q_proj = nn.Linear(self.model_dim, self.model_dim)
         self.k_proj = nn.Linear(self.model_dim, self.model_dim)
         self.v_proj = nn.Linear(self.model_dim, self.model_dim)
         self.out_proj = nn.Linear(self.model_dim, self.model_dim)
+        self.attention_dropout = nn.Dropout(dropout)
+        self.residual_dropout = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(self.model_dim)
         self.feed_forward = nn.Sequential(
             nn.Linear(self.model_dim, self.model_dim * 2),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(self.model_dim * 2, self.model_dim),
         )
-        self.pool_projection = nn.Linear(self.model_dim, 1)
-        self.classifier = nn.Linear(self.model_dim * 2, n_classes)
 
     def _self_attention(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, num_tokens, _channels = x.shape
@@ -361,22 +410,15 @@ class MiniRocketMultiAttentionHead(nn.Module):
         k = self.k_proj(x).view(batch_size, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch_size, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
         attention_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attention_probs = torch.softmax(attention_scores, dim=-1)
+        attention_probs = self.attention_dropout(torch.softmax(attention_scores, dim=-1))
         attended = torch.matmul(attention_probs, v)
         attended = attended.transpose(1, 2).contiguous().view(batch_size, num_tokens, self.model_dim)
         return self.out_proj(attended)
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        if tokens.ndim != 3:
-            raise ValueError("MiniRocketMultiAttentionHead expects [batch, tokens, token_dim] input.")
-
-        x = self.token_projection(tokens) + self.position_embedding[:, : tokens.shape[1]]
-        x = x + self._self_attention(self.norm1(x))
-        x = x + self.feed_forward(self.norm2(x))
-        pool_weights = torch.softmax(self.pool_projection(x).squeeze(-1), dim=-1)
-        pooled = torch.sum(x * pool_weights.unsqueeze(-1), dim=1)
-        summary = x.mean(dim=1)
-        return self.classifier(torch.cat([pooled, summary], dim=1))
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.residual_dropout(self._self_attention(self.norm1(x)))
+        x = x + self.residual_dropout(self.feed_forward(self.norm2(x)))
+        return x
 
 
 class MiniRocketClassifier(nn.Module):
@@ -391,6 +433,8 @@ class MiniRocketClassifier(nn.Module):
         head_type: str = "multiattention",
         attention_dim: int = 128,
         attention_heads: int = 4,
+        attention_layers: int = 2,
+        attention_dropout: float = 0.1,
     ):
         super().__init__()
         self.head_type = str(head_type)
@@ -415,6 +459,8 @@ class MiniRocketClassifier(nn.Module):
                 n_classes=n_classes,
                 model_dim=attention_dim,
                 num_heads=attention_heads,
+                num_layers=attention_layers,
+                dropout=attention_dropout,
             )
         else:
             raise ValueError(f"Unsupported MiniRocket head_type: {self.head_type}")
@@ -468,6 +514,7 @@ def transform_sequence_tokens(
 
 
 __all__ = [
+    "MiniRocketAttentionBlock",
     "MiniRocketClassifier",
     "MiniRocketFeatureExtractor",
     "MiniRocketMultiAttentionHead",

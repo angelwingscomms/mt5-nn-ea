@@ -1,0 +1,71 @@
+CS	0	02:27:44.085	Startup	MetaTester 5 build 5729, 3 Apr 2026
+CS	0	02:27:44.085	Startup	Windows 11 build 22621, 8 x Intel Core i7-8565U  @ 1.80GHz, AVX2, 2 / 7 Gb memory, 215 / 238 Gb disk, admin, GMT+1
+CS	0	02:27:44.087	Server	MetaTester 5 started on 127.0.0.1:3000
+CS	0	02:27:44.088	Startup	cloud network mode is off
+CS	0	02:27:44.088	Startup	initialization finished
+CS	0	02:27:44.281	127.0.0.1	login (build 5729)
+CS	0	02:27:44.378	Network	12968 bytes of account info loaded
+CS	0	02:27:44.378	Network	1478 bytes of tester parameters loaded
+CS	0	02:27:44.378	Network	5828 bytes of input parameters loaded
+CS	0	02:27:44.379	Network	2166 bytes of symbols list loaded (349 symbols)
+CS	0	02:27:44.380	Tester	expert file added: Experts\trade-bot\live.ex5. 1728600 bytes loaded
+CS	0	02:27:44.388	Tester	2556 Mb available, 31 blocks set for ticks generating
+CS	0	02:27:44.388	Tester	initial deposit 10000.00 USD, leverage 1:200
+CS	0	02:27:44.388	Tester	successfully initialized
+CS	0	02:27:44.388	Network	1692 Kb of total initialization data received
+CS	0	02:27:44.388	Tester	Intel Core i7-8565U  @ 1.80GHz, 8006 MB
+CS	0	02:27:44.420	Symbols	BTCUSD: symbol to be synchronized
+CS	0	02:27:44.421	Symbols	BTCUSD: symbol synchronized, 4520 bytes of symbol info received
+CS	0	02:27:44.422	History	BTCUSD: load 27 bytes of history data to synchronize in 0:00:00.000
+CS	0	02:27:44.422	History	BTCUSD: history synchronized from 2025.01.02 to 2026.04.04
+CS	0	02:27:44.423	Ticks	BTCUSD: ticks synchronization started
+CS	0	02:27:44.423	Ticks	BTCUSD: load 34 bytes of tick data to synchronize in 0:00:00.000
+CS	0	02:27:44.423	Ticks	BTCUSD: history ticks synchronized from 2026.03.26 to 2026.04.03
+CS	0	02:27:44.504	History	BTCUSD,H1: history cache allocated for 10465 bars and contains 10448 bars from 2025.01.02 00:00 to 2026.03.30 23:00
+CS	0	02:27:44.504	History	BTCUSD,H1: history begins from 2025.01.02 00:00
+CS	0	02:27:44.534	Tester	BTCUSD,H1 (EGlobalTrade-Demo): generating based on real ticks
+CS	0	02:27:44.534	Tester	BTCUSD,H1: testing of Experts\trade-bot\live.ex5 from 2026.03.31 00:00 to 2026.04.01 00:00 started with inputs:
+CS	0	02:27:44.534	Tester	  R=false
+CS	0	02:27:44.534	Tester	  FIXED_MOVE=1.44
+CS	0	02:27:44.534	Tester	  SL_MULTIPLIER=0.72
+CS	0	02:27:44.534	Tester	  TP_MULTIPLIER=0.12
+CS	0	02:27:44.534	Tester	  LOT_SIZE=0.54
+CS	0	02:27:44.534	Tester	  RISK_PERCENT=0.05
+CS	0	02:27:44.534	Tester	  LOT_MIN=0.09
+CS	0	02:27:44.534	Tester	  MAGIC_NUMBER=777777
+CS	0	02:27:44.534	Tester	  DEBUG_LOG=false
+CS	0	02:27:44.534	Tester	  LAST_MODEL=true
+CS	0	02:27:44.534	Tester	  MODEL_DATETIME=
+CS	0	02:27:44.671	ONNX	api version 1.24.2 initialized
+CS	0	02:27:49.840	live (BTCUSD,H1)	2026.03.31 00:00:00   ONNX: CPU selected
+CS	0	02:27:49.927	Ticks	BTCUSD : real ticks begin from 2026.03.26 00:00:00
+CS	0	02:27:58.382	Trade	2026.03.31 15:56:14   market sell 0.09 BTCUSD sl: 67304.17 tp: 67239.81 (67249.00 / 67276.00)
+CS	0	02:27:58.382	Trades	2026.03.31 15:56:14   deal #2 sell 0.09 BTCUSD at 67249.00 done (based on order #2)
+CS	0	02:27:58.382	Trade	2026.03.31 15:56:14   deal performed [#2 sell 0.09 BTCUSD at 67249.00]
+CS	0	02:27:58.382	Trade	2026.03.31 15:56:14   order performed sell 0.09 at 67249.00 [#2 sell 0.09 BTCUSD at 67249.00]
+CS	0	02:27:58.382	live (BTCUSD,H1)	2026.03.31 15:56:14   CTrade::OrderSend: market sell 0.09 BTCUSD sl: 67304.17 tp: 67239.81 [done at 67249.00]
+CS	0	02:27:58.382	Trade	2026.03.31 15:56:22   take profit triggered #2 sell 0.09 BTCUSD 67249.00 sl: 67304.17 tp: 67239.81 [#3 buy 0.09 BTCUSD at 67239.81]
+CS	0	02:27:58.382	Trades	2026.03.31 15:56:22   deal #3 buy 0.09 BTCUSD at 67220.50 done (based on order #3)
+CS	0	02:27:58.382	Trade	2026.03.31 15:56:22   deal performed [#3 buy 0.09 BTCUSD at 67220.50]
+CS	0	02:27:58.382	Trade	2026.03.31 15:56:22   order performed buy 0.09 at 67220.50 [#3 buy 0.09 BTCUSD at 67239.81]
+CS	0	02:27:58.389	Trade	2026.03.31 15:56:43   market sell 0.09 BTCUSD sl: 67232.24 tp: 67167.79 (67177.00 / 67204.00)
+CS	0	02:27:58.389	Trades	2026.03.31 15:56:43   deal #4 sell 0.09 BTCUSD at 67177.00 done (based on order #4)
+CS	0	02:27:58.389	Trade	2026.03.31 15:56:43   deal performed [#4 sell 0.09 BTCUSD at 67177.00]
+CS	0	02:27:58.389	Trade	2026.03.31 15:56:43   order performed sell 0.09 at 67177.00 [#4 sell 0.09 BTCUSD at 67177.00]
+CS	0	02:27:58.389	live (BTCUSD,H1)	2026.03.31 15:56:43   CTrade::OrderSend: market sell 0.09 BTCUSD sl: 67232.24 tp: 67167.79 [done at 67177.00]
+CS	0	02:27:58.389	Trade	2026.03.31 15:56:57   stop loss triggered #4 sell 0.09 BTCUSD 67177.00 sl: 67232.24 tp: 67167.79 [#5 buy 0.09 BTCUSD at 67232.24]
+CS	0	02:27:58.389	Trades	2026.03.31 15:56:57   deal #5 buy 0.09 BTCUSD at 67233.00 done (based on order #5)
+CS	0	02:27:58.389	Trade	2026.03.31 15:56:57   deal performed [#5 buy 0.09 BTCUSD at 67233.00]
+CS	0	02:27:58.389	Trade	2026.03.31 15:56:57   order performed buy 0.09 at 67233.00 [#5 buy 0.09 BTCUSD at 67232.24]
+CS	0	02:28:03.413	Tester	final balance 9997.53 USD
+CS	0	02:28:03.413	live (BTCUSD,H1)	2026.03.31 23:59:56   [SUMMARY] bar_mode=IMBALANCE risk_mode=ATR fixed_move=1.44 risk_pct=0.050 predictions=1607 hold_skips=1085 confidence_skips=510 position_skips=0 stops_too_close=0 volume_skips=10 open_failures=0 trades_opened=2 trades_closed=2 wins=1 losses=1 realized_pnl=-2.47 balance=9997.53
+CS	0	02:28:03.516	Tester	BTCUSD,H1: 116020 ticks, 24 bars generated. Environment synchronized in 0:00:00.107. Test passed in 0:00:19.127 (including ticks preprocessing 0:00:00.031).
+CS	0	02:28:03.516	Tester	BTCUSD,H1: total time from login to stop testing 0:00:19.234 (including 0:00:00.107 for history data synchronization)
+CS	0	02:28:03.516	Tester	109 Mb memory used including 0.94 Mb of history data, 64 Mb of tick data
+CS	0	02:28:03.516	Tester	log file "C:\Program Files\MetaTrader 5\Tester\Agent-127.0.0.1-3000\logs\20260406.log" written
+CS	0	02:28:03.516	Tester	test Experts\trade-bot\live.ex5 on BTCUSD,H1 thread finished
+CS	0	02:28:03.530	127.0.0.1	tester forced to close
+CS	0	02:28:03.530	127.0.0.1	prepare for shutdown
+CS	0	02:28:03.530	127.0.0.1	stop immediately
+CS	0	02:28:03.530	127.0.0.1	shutdown finished
+CS	0	02:28:03.740	Server	MetaTester 5 stopped

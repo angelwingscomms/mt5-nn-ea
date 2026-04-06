@@ -13,6 +13,7 @@ from pathlib import Path
 from mt5_runtime import (
     DEFAULT_WINDOWS_METAEDITOR_PATH,
     Mt5RuntimePaths,
+    PROJECT_DIR_NAME,
     build_metaeditor_compile_command,
     ensure_runtime_dirs,
     resolve_metaeditor_path,
@@ -31,9 +32,10 @@ LIVE_EX5_PATH = SCRIPT_DIR / "live.ex5"
 LIVE_COMPILE_LOG_PATH = SCRIPT_DIR / "live.compile.log"
 DEFAULT_METAEDITOR_PATH = DEFAULT_WINDOWS_METAEDITOR_PATH
 DEFAULT_MODEL_STAMP_FORMAT = "%d_%m_%Y-%H_%M__%S"
-MODEL_STAMP_PATTERN = re.compile(r"^\d{2}_\d{2}_\d{4}-\d{2}_\d{2}__\d{2}$")
+MODEL_STAMP_PATTERN = re.compile(r"^\d{2}_\d{2}_\d{4}-\d{2}_\d{2}(?:__|_)\d{2}$")
 MODEL_STAMP_FORMATS = (
     DEFAULT_MODEL_STAMP_FORMAT,
+    "%d_%m_%Y-%H_%M_%S",
     "%d__%m__%Y-%H_%M__%S",
     "%d__%m__%Y-%H_%M_%S",
     "%Y%m%d_%H%M%S",
@@ -45,6 +47,12 @@ MODEL_FILE_NAME = "model.onnx"
 MODEL_CONFIG_SNAPSHOT_NAME = "model_config_snapshot.mqh"
 SHARED_CONFIG_SNAPSHOT_NAME = "shared_config_snapshot.mqh"
 DEFAULT_TEST_CONFIG_NAME = "backtest_config.json"
+LIVE_MODEL_BLOCK_BEGIN = "// @active-model-reference begin"
+LIVE_MODEL_BLOCK_END = "// @active-model-reference end"
+LIVE_MODEL_BLOCK_PATTERN = re.compile(
+    rf"{re.escape(LIVE_MODEL_BLOCK_BEGIN)}.*?{re.escape(LIVE_MODEL_BLOCK_END)}",
+    re.DOTALL,
+)
 
 
 def format_model_stamp(value: datetime | None = None) -> str:
@@ -124,7 +132,13 @@ def iter_model_dirs(symbol: str) -> list[Path]:
 
 
 def latest_model_dir(symbol: str) -> Path:
-    candidates = iter_model_dirs(symbol)
+    candidates = [
+        candidate
+        for candidate in iter_model_dirs(symbol)
+        if model_onnx_path(candidate).exists()
+        and model_config_snapshot_path(candidate).exists()
+        and shared_config_snapshot_path(candidate).exists()
+    ]
     if not candidates:
         raise FileNotFoundError(f"No archived models found for symbol '{symbol}'.")
     return candidates[-1]
@@ -234,41 +248,56 @@ def activate_model(model_dir: Path) -> None:
     shutil.copy2(model_config_path, ACTIVE_MODEL_CONFIG_PATH)
     shutil.copy2(shared_config_path, ACTIVE_SHARED_CONFIG_PATH)
     sync_directory_contents(diagnostics_dir, ACTIVE_DIAGNOSTICS_DIR)
+    set_live_model_reference(model_dir)
 
 
-def deploy_to_last_model(onnx_path: Path, model_config_path: Path, shared_config_path: Path, 
-                          diagnostics_dir: Path, tests_dir: Path) -> None:
-    """Deploy model files to models/last_model/ for live.mq5 to reference."""
-    last_model_dir = MODELS_DIR / "last_model"
-    log = logging.getLogger(__name__)
-    
-    if not onnx_path.exists():
-        raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
-    if not model_config_path.exists():
-        raise FileNotFoundError(f"Model config not found: {model_config_path}")
-    if not shared_config_path.exists():
-        raise FileNotFoundError(f"Shared config not found: {shared_config_path}")
-    if not diagnostics_dir.exists():
-        raise FileNotFoundError(f"Diagnostics directory not found: {diagnostics_dir}")
-    
-    last_model_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Copy model files
-    shutil.copy2(onnx_path, last_model_dir / "model.onnx")
-    shutil.copy2(model_config_path, last_model_dir / "model_config.mqh")
-    shutil.copy2(shared_config_path, last_model_dir / "shared_config.mqh")
-    
-    # Sync diagnostics
-    sync_directory_contents(diagnostics_dir, last_model_dir / "diagnostics")
-    
-    # Copy test config if it exists
-    if tests_dir.exists():
-        tests_dest = last_model_dir / "tests"
-        if tests_dest.exists():
-            shutil.rmtree(tests_dest)
-        shutil.copytree(tests_dir, tests_dest)
-    
-    log.info("Deployed model to %s", last_model_dir)
+def build_live_model_reference_block(model_dir: Path) -> str:
+    try:
+        relative_model_dir = model_dir.relative_to(SCRIPT_DIR)
+    except ValueError as exc:
+        raise ValueError(f"Model directory must live under {SCRIPT_DIR}: {model_dir}") from exc
+
+    symbol = sanitize_symbol(model_dir.parent.name)
+    version = model_dir.name
+    include_dir = relative_model_dir.as_posix()
+    resource_dir = str(relative_model_dir).replace("/", "\\").replace("\\", "\\\\")
+    return "\n".join(
+        [
+            LIVE_MODEL_BLOCK_BEGIN,
+            f'#define ACTIVE_MODEL_SYMBOL "{symbol}"',
+            f'#define ACTIVE_MODEL_VERSION "{version}"',
+            f'#include "{include_dir}/diagnostics/{SHARED_CONFIG_SNAPSHOT_NAME}"',
+            f'#include "{include_dir}/diagnostics/{MODEL_CONFIG_SNAPSHOT_NAME}"',
+            f'#resource "\\\\Experts\\\\{PROJECT_DIR_NAME}\\\\{resource_dir}\\\\{MODEL_FILE_NAME}" as uchar model_buffer[]',
+            LIVE_MODEL_BLOCK_END,
+        ]
+    )
+
+
+def set_live_model_reference(model_dir: Path, live_path: Path = LIVE_MQ5_PATH) -> None:
+    if not model_onnx_path(model_dir).exists():
+        raise FileNotFoundError(f"Archived ONNX file not found: {model_onnx_path(model_dir)}")
+    if not model_config_snapshot_path(model_dir).exists():
+        raise FileNotFoundError(
+            f"Archived model config snapshot not found: {model_config_snapshot_path(model_dir)}"
+        )
+    if not shared_config_snapshot_path(model_dir).exists():
+        raise FileNotFoundError(
+            f"Archived shared config snapshot not found: {shared_config_snapshot_path(model_dir)}"
+        )
+
+    text = live_path.read_text(encoding="utf-8")
+    updated_text, replacements = LIVE_MODEL_BLOCK_PATTERN.subn(
+        build_live_model_reference_block(model_dir),
+        text,
+        count=1,
+    )
+    if replacements != 1:
+        raise ValueError(
+            f"{live_path} is missing the active model reference markers "
+            f"{LIVE_MODEL_BLOCK_BEGIN!r} / {LIVE_MODEL_BLOCK_END!r}."
+        )
+    live_path.write_text(updated_text, encoding="utf-8")
 
 
 def deploy_active_model(runtime: Mt5RuntimePaths) -> None:
