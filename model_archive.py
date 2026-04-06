@@ -260,7 +260,7 @@ def build_live_model_reference_block(model_dir: Path) -> str:
     symbol = sanitize_symbol(model_dir.parent.name)
     version = model_dir.name
     include_dir = relative_model_dir.as_posix()
-    resource_dir = str(relative_model_dir).replace("/", "\\").replace("\\", "\\\\")
+    resource_dir = str(relative_model_dir).replace("/", "\\")
     return "\n".join(
         [
             LIVE_MODEL_BLOCK_BEGIN,
@@ -268,7 +268,7 @@ def build_live_model_reference_block(model_dir: Path) -> str:
             f'#define ACTIVE_MODEL_VERSION "{version}"',
             f'#include "{include_dir}/diagnostics/{SHARED_CONFIG_SNAPSHOT_NAME}"',
             f'#include "{include_dir}/diagnostics/{MODEL_CONFIG_SNAPSHOT_NAME}"',
-            f'#resource "\\\\Experts\\\\{PROJECT_DIR_NAME}\\\\{resource_dir}\\\\{MODEL_FILE_NAME}" as uchar model_buffer[]',
+            f'#resource "{include_dir}\\\\{MODEL_FILE_NAME}" as uchar model_buffer[]',
             LIVE_MODEL_BLOCK_END,
         ]
     )

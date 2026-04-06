@@ -1,10 +1,10 @@
 #include <Trade\Trade.mqh>
 // @active-model-reference begin
 #define ACTIVE_MODEL_SYMBOL "BTCUSD"
-#define ACTIVE_MODEL_VERSION "06_04_2026-13_06__33"
-#include "models/BTCUSD/06_04_2026-13_06__33/diagnostics/shared_config_snapshot.mqh"
-#include "models/BTCUSD/06_04_2026-13_06__33/diagnostics/model_config_snapshot.mqh"
-#resource "models\\BTCUSD\\06_04_2026-13_06__33\\model.onnx" as uchar model_buffer[]
+#define ACTIVE_MODEL_VERSION "06_04_2026-17_01__50"
+#include "models/BTCUSD/06_04_2026-17_01__50/diagnostics/shared_config_snapshot.mqh"
+#include "models/BTCUSD/06_04_2026-17_01__50/diagnostics/model_config_snapshot.mqh"
+#resource "models/BTCUSD/06_04_2026-17_01__50\model.onnx" as uchar model_buffer[]
 // @active-model-reference end
 
 #ifndef MODEL_USE_ATR_RISK
@@ -719,36 +719,36 @@ void Execute(int signal) {
       return;
    }
 
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double price = (signal == 1) ? ask : bid;
-   double sl_distance = StopDistance();
-   double tp_distance = TargetDistance();
-   if(sl_distance <= 0.0 || tp_distance <= 0.0) {
-      trade_open_failed_count++;
-      DebugPrint(
-         StringFormat(
-            "skip trade: invalid risk distances sl_distance=%.5f tp_distance=%.5f",
-            sl_distance,
-            tp_distance
-         )
-      );
-      return;
-   }
-   double sl = (signal == 1)
-      ? (price - sl_distance)
-      : (price + sl_distance);
-   double tp = (signal == 1)
-      ? (price + tp_distance)
-      : (price - tp_distance);
-   price = NormalizeDouble(price, digits);
-   sl = NormalizeDouble(sl, digits);
-   tp = NormalizeDouble(tp, digits);
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+    double trigger_price = (signal == 1) ? bid : ask;
+    double price = (signal == 1) ? ask : bid;
+    double sl_distance = StopDistance();
+    double tp_distance = TargetDistance();
+    if(sl_distance <= 0.0 || tp_distance <= 0.0) {
+       trade_open_failed_count++;
+       DebugPrint(
+          StringFormat(
+             "skip trade: invalid risk distances sl_distance=%.5f tp_distance=%.5f",
+             sl_distance,
+             tp_distance
+          )
+       );
+       return;
+    }
+    double sl = (signal == 1)
+       ? (trigger_price - sl_distance)
+       : (trigger_price + sl_distance);
+    double tp = (signal == 1)
+       ? (trigger_price + tp_distance)
+       : (trigger_price - tp_distance);
+    price = NormalizeDouble(price, digits);
+    sl = NormalizeDouble(sl, digits);
+    tp = NormalizeDouble(tp, digits);
 
-   double min_stop_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-   double freeze_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
-   double min_dist = MathMax(min_stop_dist, freeze_dist);
-   double trigger_price = (signal == 1) ? bid : ask;
+    double min_stop_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+    double freeze_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
+    double min_dist = MathMax(min_stop_dist, freeze_dist);
    double sl_gap = (signal == 1) ? (trigger_price - sl) : (sl - trigger_price);
    double tp_gap = (signal == 1) ? (tp - trigger_price) : (trigger_price - tp);
    if(sl_gap < min_dist || tp_gap < min_dist) {

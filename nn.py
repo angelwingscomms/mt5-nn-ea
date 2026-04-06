@@ -72,24 +72,82 @@ DEFAULT_ATTENTION_DROPOUT = 0.1
 DEFAULT_CONFIDENCE_SEARCH_MIN = 0.40
 DEFAULT_CONFIDENCE_SEARCH_MAX = 0.99
 DEFAULT_CONFIDENCE_SEARCH_STEPS = 60
-FEATURE_MACRO_TO_NAME = {
-    "FEATURE_IDX_RET1": "ret1",
-    "FEATURE_IDX_HIGH_REL_PREV": "high_rel_prev",
-    "FEATURE_IDX_LOW_REL_PREV": "low_rel_prev",
-    "FEATURE_IDX_SPREAD_REL": "spread_rel",
-    "FEATURE_IDX_CLOSE_IN_RANGE": "close_in_range",
-    "FEATURE_IDX_ATR_REL": "atr_rel",
-    "FEATURE_IDX_RV": "rv",
-    "FEATURE_IDX_RETURN_N": "ret_n",
-    "FEATURE_IDX_TICK_IMBALANCE": "tick_imbalance",
-}
+BASE_FEATURE_COLUMNS = (
+    "ret1",
+    "high_rel_prev",
+    "low_rel_prev",
+    "spread_rel",
+    "close_in_range",
+    "atr_rel",
+    "rv",
+    "ret_n",
+    "tick_imbalance",
+)
+MINIROCKET_EXTRA_FEATURES = (
+    "ret_2",
+    "ret_3",
+    "ret_6",
+    "ret_12",
+    "open_rel_prev",
+    "range_rel",
+    "body_rel",
+    "upper_wick_rel",
+    "lower_wick_rel",
+    "close_rel_sma_3",
+    "close_rel_sma_9",
+    "close_rel_sma_20",
+    "sma_3_9_gap",
+    "sma_9_20_gap",
+    "rv_3",
+    "rv_6",
+    "rv_18",
+    "donchian_pos_9",
+    "donchian_width_9",
+    "donchian_pos_20",
+    "donchian_width_20",
+    "tick_count_rel_9",
+    "tick_count_z_9",
+    "tick_count_chg",
+    "tick_imbalance_sma_5",
+    "tick_imbalance_sma_9",
+    "spread_z_9",
+)
+SEQUENCE_EXTRA_FEATURES = (
+    "ret_2",
+    "ret_6",
+    "ret_12",
+    "ret_20",
+    "range_rel",
+    "body_rel",
+    "upper_wick_rel",
+    "lower_wick_rel",
+    "close_rel_sma_9",
+    "close_rel_sma_20",
+    "sma_5_20_gap",
+    "sma_9_20_gap",
+    "sma_slope_9",
+    "sma_slope_20",
+    "rsi_6",
+    "rsi_14",
+    "stoch_k_9",
+    "stoch_d_3",
+    "stoch_gap",
+    "bollinger_pos_20",
+    "bollinger_width_20",
+    "atr_ratio_20",
+    "rv_18",
+    "donchian_pos_20",
+    "tick_count_z_9",
+    "tick_imbalance_sma_9",
+    "spread_z_9",
+)
+ALL_FEATURE_COLUMNS = tuple(dict.fromkeys(BASE_FEATURE_COLUMNS + MINIROCKET_EXTRA_FEATURES + SEQUENCE_EXTRA_FEATURES))
 
 
 SHARED = load_define_file(SHARED_CONFIG_PATH)
 SYMBOL = str(SHARED.get("SYMBOL", "XAUUSD"))
 SEQ_LEN = int(SHARED["SEQ_LEN"])
 TARGET_HORIZON = int(SHARED["TARGET_HORIZON"])
-MODEL_FEATURE_COUNT = int(SHARED["MODEL_FEATURE_COUNT"])
 FEATURE_ATR_PERIOD = int(SHARED["FEATURE_ATR_PERIOD"])
 TARGET_ATR_PERIOD = int(SHARED["TARGET_ATR_PERIOD"])
 RV_PERIOD = int(SHARED["RV_PERIOD"])
@@ -110,15 +168,29 @@ DEFAULT_BATCH_SIZE = int(SHARED["DEFAULT_BATCH_SIZE"])
 DEFAULT_MAX_TRAIN_WINDOWS = int(SHARED["DEFAULT_MAX_TRAIN_WINDOWS"])
 DEFAULT_MAX_EVAL_WINDOWS = int(SHARED["DEFAULT_MAX_EVAL_WINDOWS"])
 DEFAULT_PATIENCE = int(SHARED["DEFAULT_PATIENCE"])
-
-FEATURE_COLUMNS = [None] * MODEL_FEATURE_COUNT
-for macro_name, feature_name in FEATURE_MACRO_TO_NAME.items():
-    feature_index = int(SHARED[macro_name])
-    FEATURE_COLUMNS[feature_index] = feature_name
-if any(name is None for name in FEATURE_COLUMNS):
-    raise RuntimeError("shared_config.mqh does not define a complete feature order.")
-FEATURE_COLUMNS = tuple(FEATURE_COLUMNS)
 LABEL_NAMES = ("HOLD", "BUY", "SELL")
+
+
+def feature_macro_name(feature_name: str) -> str:
+    if feature_name == "ret_n":
+        return "FEATURE_IDX_RETURN_N"
+    return f"FEATURE_IDX_{feature_name.upper()}"
+
+
+def resolve_feature_columns(architecture: str, use_extended_features: bool) -> tuple[str, ...]:
+    if not use_extended_features:
+        return BASE_FEATURE_COLUMNS
+    if architecture == "minirocket":
+        return BASE_FEATURE_COLUMNS + MINIROCKET_EXTRA_FEATURES
+    return BASE_FEATURE_COLUMNS + SEQUENCE_EXTRA_FEATURES
+
+
+def resolve_feature_profile(architecture: str, use_extended_features: bool) -> str:
+    if not use_extended_features:
+        return "core"
+    if architecture == "minirocket":
+        return "minirocket_extended"
+    return "sequence_extended"
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,6 +234,15 @@ def parse_args() -> argparse.Namespace:
         "--use-fixed-time-bars",
         action="store_true",
         help="Build, train, and compile using fixed-time bars instead of the default imbalance bars.",
+    )
+    parser.add_argument(
+        "-f",
+        "--use-extended-features",
+        action="store_true",
+        help=(
+            "Enable 27 extra architecture-aware market features. MiniRocket gets a shape/microstructure-heavy "
+            "pack; Mamba/Castor get an indicator/regime-heavy pack."
+        ),
     )
     architecture_group = parser.add_mutually_exclusive_group()
     architecture_group.add_argument(
@@ -375,7 +456,34 @@ def build_time_bar_ids(time_msc: np.ndarray) -> np.ndarray:
     return time_msc // BAR_DURATION_MS
 
 
-def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> pd.DataFrame:
+def infer_point_size_from_ticks(df_ticks: pd.DataFrame, max_samples: int = 200_000) -> float:
+    prices = np.concatenate(
+        [
+            df_ticks["bid"].to_numpy(dtype=np.float64, copy=False),
+            df_ticks["ask"].to_numpy(dtype=np.float64, copy=False),
+        ]
+    )
+    prices = prices[np.isfinite(prices)]
+    if len(prices) == 0:
+        return 1.0
+
+    sample = np.round(prices[: max_samples], 8)
+    unique_prices = np.unique(sample)
+    if len(unique_prices) < 2:
+        return 1.0
+
+    scaled = np.rint(unique_prices * 1e8).astype(np.int64)
+    diffs = np.diff(scaled)
+    diffs = diffs[diffs > 0]
+    if len(diffs) == 0:
+        return 1.0
+
+    gcd_points = int(np.gcd.reduce(diffs[: min(len(diffs), 50_000)]))
+    point_size = gcd_points / 1e8 if gcd_points > 0 else 1.0
+    return float(point_size if point_size > 0.0 else 1.0)
+
+
+def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> tuple[pd.DataFrame, float]:
     t0 = time.time()
     chunks = []
     read_csv_kwargs = {
@@ -401,6 +509,7 @@ def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> pd.DataFrame
         df = df.reset_index(drop=True)
     if df.empty:
         raise ValueError(f"No ticks found in {csv_path}")
+    point_size = infer_point_size_from_ticks(df)
 
     df["tick_sign"] = compute_tick_signs(df["bid"].to_numpy(dtype=np.float64, copy=False))
     df["spread"] = df["ask"] - df["bid"]
@@ -426,12 +535,13 @@ def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> pd.DataFrame
         grouped["time_close"] = grouped["time_open"] + BAR_DURATION_MS
         grouped = grouped.drop(columns=["bar_id"])
         log.info(
-            "Built %d bars in %.2fs using fixed %ds bars",
+            "Built %d bars in %.2fs using fixed %ds bars | point_size=%.8f",
             len(grouped),
             time.time() - t0,
             PRIMARY_BAR_SECONDS,
+            point_size,
         )
-        return grouped
+        return grouped, point_size
 
     df["bar_id"] = build_primary_bar_ids(df)
     grouped = (
@@ -452,35 +562,130 @@ def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> pd.DataFrame
         .reset_index(drop=True)
     )
     log.info(
-        "Built %d bars in %.2fs using imbalance bars min_ticks=%d span=%d",
+        "Built %d bars in %.2fs using imbalance bars min_ticks=%d span=%d | point_size=%.8f",
         len(grouped),
         time.time() - t0,
         IMBALANCE_MIN_TICKS,
         IMBALANCE_EMA_SPAN,
+        point_size,
     )
-    return grouped
+    return grouped, point_size
 
 
-def compute_features(df: pd.DataFrame) -> np.ndarray:
+def rolling_population_std(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window, min_periods=window).std(ddof=0)
+
+
+def rolling_zscore(series: pd.Series, window: int) -> pd.Series:
+    mean = series.rolling(window, min_periods=window).mean()
+    std = rolling_population_std(series, window)
+    return (series - mean) / (std + EPS)
+
+
+def simple_rsi(close: pd.Series, period: int) -> pd.Series:
+    delta = close.diff()
+    gains = delta.clip(lower=0.0)
+    losses = (-delta).clip(lower=0.0)
+    avg_gain = gains.rolling(period, min_periods=period).mean()
+    avg_loss = losses.rolling(period, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + EPS)
+    return (100.0 - (100.0 / (1.0 + rs)) - 50.0) / 50.0
+
+
+def fixed_move_price_distance(fixed_move_points: float, point_size: float) -> float:
+    return float(fixed_move_points) * float(point_size)
+
+
+def compute_features(df: pd.DataFrame, feature_columns: tuple[str, ...]) -> np.ndarray:
     close = df["close"].astype(float)
+    open_price = df["open"].astype(float)
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    tick_count = df["tick_count"].astype(float)
+    tick_imbalance = df["tick_imbalance"].astype(float)
     prev_close = close.shift(1)
     ret1 = np.log(close / (prev_close + EPS))
     atr_feature = wilder_atr(df["high"], df["low"], close, period=FEATURE_ATR_PERIOD)
+    spread_rel = df["spread"] / (close + EPS)
+
+    sma_3 = close.rolling(3, min_periods=3).mean()
+    sma_5 = close.rolling(5, min_periods=5).mean()
+    sma_9 = close.rolling(9, min_periods=9).mean()
+    sma_20 = close.rolling(20, min_periods=20).mean()
+    rv_3 = rolling_population_std(ret1, 3)
+    rv_6 = rolling_population_std(ret1, 6)
+    rv_18 = rolling_population_std(ret1, 18)
+    high_9 = high.rolling(9, min_periods=9).max()
+    low_9 = low.rolling(9, min_periods=9).min()
+    high_20 = high.rolling(20, min_periods=20).max()
+    low_20 = low.rolling(20, min_periods=20).min()
+    stoch_k_9 = (close - low_9) / (high_9 - low_9 + EPS)
+    stoch_d_3 = stoch_k_9.rolling(3, min_periods=3).mean()
+    bollinger_std_20 = rolling_population_std(close, 20)
 
     feat = pd.DataFrame(index=df.index)
     feat["ret1"] = ret1
-    feat["high_rel_prev"] = np.log(df["high"] / (prev_close + EPS))
-    feat["low_rel_prev"] = np.log(df["low"] / (prev_close + EPS))
-    feat["spread_rel"] = df["spread"] / (close + EPS)
-    feat["close_in_range"] = (close - df["low"]) / (df["high"] - df["low"] + 1e-8)
+    feat["high_rel_prev"] = np.log(high / (prev_close + EPS))
+    feat["low_rel_prev"] = np.log(low / (prev_close + EPS))
+    feat["spread_rel"] = spread_rel
+    feat["close_in_range"] = (close - low) / (high - low + 1e-8)
     feat["atr_rel"] = atr_feature / (close + EPS)
-    feat["rv"] = ret1.rolling(RV_PERIOD, min_periods=RV_PERIOD).std(ddof=0)
+    feat["rv"] = rolling_population_std(ret1, RV_PERIOD)
     feat["ret_n"] = np.log(close / (close.shift(RETURN_PERIOD) + EPS))
-    feat["tick_imbalance"] = df["tick_imbalance"].astype(float)
-    return feat.loc[:, FEATURE_COLUMNS].to_numpy(dtype=np.float32, copy=False)
+    feat["tick_imbalance"] = tick_imbalance
+
+    feat["ret_2"] = np.log(close / (close.shift(2) + EPS))
+    feat["ret_3"] = np.log(close / (close.shift(3) + EPS))
+    feat["ret_6"] = np.log(close / (close.shift(6) + EPS))
+    feat["ret_12"] = np.log(close / (close.shift(12) + EPS))
+    feat["ret_20"] = np.log(close / (close.shift(20) + EPS))
+    feat["open_rel_prev"] = np.log(open_price / (prev_close + EPS))
+    feat["range_rel"] = (high - low) / (close + EPS)
+    feat["body_rel"] = (close - open_price) / (close + EPS)
+    feat["upper_wick_rel"] = (high - np.maximum(open_price, close)) / (close + EPS)
+    feat["lower_wick_rel"] = (np.minimum(open_price, close) - low) / (close + EPS)
+    feat["close_rel_sma_3"] = np.log(close / (sma_3 + EPS))
+    feat["close_rel_sma_9"] = np.log(close / (sma_9 + EPS))
+    feat["close_rel_sma_20"] = np.log(close / (sma_20 + EPS))
+    feat["sma_3_9_gap"] = np.log(sma_3 / (sma_9 + EPS))
+    feat["sma_5_20_gap"] = np.log(sma_5 / (sma_20 + EPS))
+    feat["sma_9_20_gap"] = np.log(sma_9 / (sma_20 + EPS))
+    feat["sma_slope_9"] = np.log(sma_9 / (sma_9.shift(3) + EPS))
+    feat["sma_slope_20"] = np.log(sma_20 / (sma_20.shift(3) + EPS))
+    feat["rv_3"] = rv_3
+    feat["rv_6"] = rv_6
+    feat["rv_18"] = rv_18
+    feat["donchian_pos_9"] = (close - low_9) / (high_9 - low_9 + EPS)
+    feat["donchian_width_9"] = (high_9 - low_9) / (close + EPS)
+    feat["donchian_pos_20"] = (close - low_20) / (high_20 - low_20 + EPS)
+    feat["donchian_width_20"] = (high_20 - low_20) / (close + EPS)
+    tick_count_sma_9 = tick_count.rolling(9, min_periods=9).mean()
+    feat["tick_count_rel_9"] = tick_count / (tick_count_sma_9 + EPS) - 1.0
+    feat["tick_count_z_9"] = rolling_zscore(tick_count, 9)
+    feat["tick_count_chg"] = np.log((tick_count + 1.0) / (tick_count.shift(1) + 1.0))
+    feat["tick_imbalance_sma_5"] = tick_imbalance.rolling(5, min_periods=5).mean()
+    feat["tick_imbalance_sma_9"] = tick_imbalance.rolling(9, min_periods=9).mean()
+    feat["spread_z_9"] = rolling_zscore(spread_rel, 9)
+    feat["rsi_6"] = simple_rsi(close, 6)
+    feat["rsi_14"] = simple_rsi(close, 14)
+    feat["stoch_k_9"] = stoch_k_9
+    feat["stoch_d_3"] = stoch_d_3
+    feat["stoch_gap"] = stoch_k_9 - stoch_d_3
+    feat["bollinger_pos_20"] = (close - sma_20) / (2.0 * bollinger_std_20 + EPS)
+    feat["bollinger_width_20"] = (4.0 * bollinger_std_20) / (sma_20 + EPS)
+    feat["atr_ratio_20"] = np.log(atr_feature / (atr_feature.rolling(20, min_periods=20).mean() + EPS))
+
+    missing_features = [name for name in feature_columns if name not in feat.columns]
+    if missing_features:
+        raise KeyError(f"Missing computed features: {missing_features}")
+    return feat.loc[:, feature_columns].to_numpy(dtype=np.float32, copy=False)
 
 
-def get_triple_barrier_labels(bars: pd.DataFrame, use_atr_risk: bool) -> np.ndarray:
+def get_triple_barrier_labels(
+    bars: pd.DataFrame,
+    use_atr_risk: bool,
+    fixed_move_price: float,
+) -> np.ndarray:
     close = bars["close"].to_numpy(dtype=np.float64, copy=False)
     high = bars["high"].to_numpy(dtype=np.float64, copy=False)
     low = bars["low"].to_numpy(dtype=np.float64, copy=False)
@@ -506,10 +711,10 @@ def get_triple_barrier_labels(bars: pd.DataFrame, use_atr_risk: bool) -> np.ndar
             short_tp = short_entry - LABEL_TP_MULTIPLIER * vol
             short_sl = short_entry + LABEL_SL_MULTIPLIER * vol
         else:
-            long_tp = long_entry + DEFAULT_FIXED_MOVE
-            long_sl = long_entry - DEFAULT_FIXED_MOVE
-            short_tp = short_entry - DEFAULT_FIXED_MOVE
-            short_sl = short_entry + DEFAULT_FIXED_MOVE
+            long_tp = long_entry + fixed_move_price
+            long_sl = long_entry - fixed_move_price
+            short_tp = short_entry - fixed_move_price
+            short_sl = short_entry + fixed_move_price
 
         long_result = 0
         short_result = 0
@@ -835,6 +1040,10 @@ def write_diagnostics(
     loss_mode: str,
     focal_gamma: float,
     model_config_text: str,
+    feature_columns: tuple[str, ...],
+    feature_profile: str,
+    point_size: float,
+    fixed_move_price: float,
 ) -> None:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -860,6 +1069,7 @@ def write_diagnostics(
         encoding="utf-8",
     )
     (diagnostics_dir / "model_config_snapshot.mqh").write_text(model_config_text, encoding="utf-8")
+    (diagnostics_dir / "active_features.txt").write_text("\n".join(feature_columns) + "\n", encoding="utf-8")
 
     report_lines = [
         "# Model Diagnostics",
@@ -867,6 +1077,8 @@ def write_diagnostics(
         "## Run",
         f"- symbol: {symbol}",
         f"- backend: {model_backend}",
+        f"- feature_profile: {feature_profile}",
+        f"- feature_count: {len(feature_columns)}",
         f"- loss_mode: {loss_mode}",
         f"- focal_gamma: {focal_gamma:.2f}",
         "",
@@ -888,7 +1100,9 @@ def write_diagnostics(
         f"- return_period: {RETURN_PERIOD}",
         f"- warmup_bars: {WARMUP_BARS}",
         f"- label_risk_mode: {'ATR' if use_atr_risk else 'FIXED'}",
-        f"- fixed_move: {DEFAULT_FIXED_MOVE:.2f}",
+        f"- point_size: {point_size:.8f}",
+        f"- fixed_move_points: {DEFAULT_FIXED_MOVE:.2f}",
+        f"- fixed_move_price: {fixed_move_price:.8f}",
         f"- label_sl_multiplier: {LABEL_SL_MULTIPLIER:.2f}",
         f"- label_tp_multiplier: {LABEL_TP_MULTIPLIER:.2f}",
         f"- execution_sl_multiplier: {EXECUTION_SL_MULTIPLIER:.2f}",
@@ -942,6 +1156,7 @@ def write_diagnostics(
         "- holdout_predictions.csv",
         "- validation_confusion_matrix.csv",
         "- holdout_confusion_matrix.csv",
+        "- active_features.txt",
         "- shared_config_snapshot.mqh",
         "- model_config_snapshot.mqh",
         "",
@@ -952,7 +1167,7 @@ def write_diagnostics(
             else ["- Imbalance bars are variable by design. Lowering imbalance_min_ticks makes them smaller on average, but it does not force a fixed tick count per bar."]
         ),
         "- In ATR mode, labels use the stricter label_sl_multiplier and label_tp_multiplier values, so a BUY/SELL label means price reached the target before making more than a tiny adverse move.",
-        "- In fixed mode, labels use the same DEFAULT_FIXED_MOVE distance for both stop loss and take profit.",
+        "- In fixed mode, labels use the same DEFAULT_FIXED_MOVE value in symbol points for both stop loss and take profit.",
         "- When use_all_windows is 0, the trainer evenly subsamples window endpoints down to the max_train_windows and max_eval_windows caps to keep runs fast.",
     ]
     (diagnostics_dir / "report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
@@ -970,7 +1185,27 @@ def build_mql_config(
     use_fixed_time_bars: bool,
     architecture: str,
     use_multihead_attention: bool,
+    feature_columns: tuple[str, ...],
+    feature_profile: str,
+    use_extended_features: bool,
 ) -> str:
+    feature_macro_lines = [
+        "#ifdef MODEL_FEATURE_COUNT",
+        "#undef MODEL_FEATURE_COUNT",
+        "#endif",
+        f"#define MODEL_FEATURE_COUNT {len(feature_columns)}",
+    ]
+    for feature_index, feature_name in enumerate(feature_columns):
+        macro_name = feature_macro_name(feature_name)
+        feature_macro_lines.extend(
+            [
+                f"#ifdef {macro_name}",
+                f"#undef {macro_name}",
+                "#endif",
+                f"#define {macro_name} {feature_index}",
+            ]
+        )
+
     return "\n".join(
         [
             "// Auto-generated by nn.py. Re-run training to refresh these values.",
@@ -978,9 +1213,12 @@ def build_mql_config(
             f"#define MODEL_USE_ATR_RISK {1 if use_atr_risk else 0}",
             f"#define MODEL_USE_FIXED_TIME_BARS {1 if use_fixed_time_bars else 0}",
             f'#define MODEL_ARCHITECTURE "{architecture}"',
+            f'#define MODEL_FEATURE_PROFILE "{feature_profile}"',
+            f"#define MODEL_USE_EXTENDED_FEATURES {1 if use_extended_features else 0}",
             f"#define MODEL_USE_MINIROCKET {1 if architecture == 'minirocket' else 0}",
             f"#define MODEL_USE_CASTOR {1 if architecture == 'castor' else 0}",
             f"#define MODEL_USE_MULTIHEAD_ATTENTION {1 if use_multihead_attention else 0}",
+            *feature_macro_lines,
             f"#define PRIMARY_CONFIDENCE {primary_confidence:.8f}",
             f"float medians[MODEL_FEATURE_COUNT] = {{{format_float_array(median)}}};",
             f"float iqrs[MODEL_FEATURE_COUNT] = {{{format_float_array(iqr)}}};",
@@ -1000,13 +1238,16 @@ def main() -> None:
     torch.manual_seed(42)
     np.random.seed(42)
     architecture = resolve_architecture(args)
+    feature_columns = resolve_feature_columns(architecture, bool(args.use_extended_features))
+    feature_profile = resolve_feature_profile(architecture, bool(args.use_extended_features))
+    feature_count = len(feature_columns)
     use_multihead_attention = bool(args.use_multihead_attention)
     use_atr_risk = not bool(args.use_fixed_risk)
     use_fixed_time_bars = bool(args.use_fixed_time_bars)
     if use_fixed_time_bars and PRIMARY_BAR_SECONDS <= 0:
         raise ValueError("PRIMARY_BAR_SECONDS must be positive.")
     if DEFAULT_FIXED_MOVE <= 0.0:
-        raise ValueError("DEFAULT_FIXED_MOVE must be positive.")
+        raise ValueError("DEFAULT_FIXED_MOVE must be positive in points.")
 
     data_path = resolve_local_path(args.data_file)
     output_path = resolve_local_path(args.output_file)
@@ -1022,7 +1263,7 @@ def main() -> None:
     log.info("Using device: %s", device)
     log.info(
         "Shared config | seq_len=%d horizon=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
-        "bar_mode=%s imbalance_min_ticks=%d imbalance_ema_span=%d bar_seconds=%d risk_mode=%s fixed_move=%.2f "
+        "bar_mode=%s imbalance_min_ticks=%d imbalance_ema_span=%d bar_seconds=%d risk_mode=%s fixed_move_points=%.2f "
         "label_sl=%.2f label_tp=%.2f exec_sl=%.2f exec_tp=%.2f use_all_windows=%d",
         SEQ_LEN,
         TARGET_HORIZON,
@@ -1043,16 +1284,25 @@ def main() -> None:
         int(USE_ALL_WINDOWS),
     )
     log.info(
-        "Run config | symbol=%s architecture=%s attention=%d focal_gamma=%.2f",
+        "Run config | symbol=%s architecture=%s attention=%d focal_gamma=%.2f feature_profile=%s feature_count=%d",
         SYMBOL,
         architecture.upper(),
         int(use_multihead_attention),
         args.focal_gamma,
+        feature_profile,
+        feature_count,
     )
 
-    bars = build_market_bars(data_path, use_fixed_time_bars=use_fixed_time_bars)
-    x_all = compute_features(bars)
-    y_all = get_triple_barrier_labels(bars, use_atr_risk=use_atr_risk)
+    bars, point_size = build_market_bars(data_path, use_fixed_time_bars=use_fixed_time_bars)
+    fixed_move_price = fixed_move_price_distance(DEFAULT_FIXED_MOVE, point_size)
+    log.info(
+        "Fixed risk config | fixed_move_points=%.2f point_size=%.8f fixed_move_price=%.8f",
+        DEFAULT_FIXED_MOVE,
+        point_size,
+        fixed_move_price,
+    )
+    x_all = compute_features(bars, feature_columns=feature_columns)
+    y_all = get_triple_barrier_labels(bars, use_atr_risk=use_atr_risk, fixed_move_price=fixed_move_price)
 
     x = x_all[WARMUP_BARS:]
     y = y_all[WARMUP_BARS:]
@@ -1214,7 +1464,7 @@ def main() -> None:
         weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MAMBA_WEIGHT_DECAY
         if architecture == "castor":
             training_model = CastorClassifier(
-                n_features=MODEL_FEATURE_COUNT,
+                n_features=feature_count,
                 use_multihead_attention=use_multihead_attention,
                 attention_heads=args.attention_heads,
                 attention_layers=args.attention_layers,
@@ -1222,7 +1472,7 @@ def main() -> None:
             ).to(device)
         else:
             training_model = MambaLiteClassifier(
-                n_features=MODEL_FEATURE_COUNT,
+                n_features=feature_count,
                 use_multihead_attention=use_multihead_attention,
                 attention_heads=args.attention_heads,
                 attention_layers=args.attention_layers,
@@ -1392,7 +1642,7 @@ def main() -> None:
 
     export_model.eval()
     export_model.to("cpu")
-    dummy = torch.randn(1, SEQ_LEN, MODEL_FEATURE_COUNT)
+    dummy = torch.randn(1, SEQ_LEN, feature_count)
     torch.onnx.export(
         export_model,
         dummy,
@@ -1418,6 +1668,9 @@ def main() -> None:
             use_fixed_time_bars=use_fixed_time_bars,
             architecture=architecture,
             use_multihead_attention=use_multihead_attention,
+            feature_columns=feature_columns,
+            feature_profile=feature_profile,
+            use_extended_features=bool(args.use_extended_features),
         )
         + "\n"
     )
@@ -1455,6 +1708,10 @@ def main() -> None:
         loss_mode=loss_mode,
         focal_gamma=args.focal_gamma,
         model_config_text=model_config_text,
+        feature_columns=feature_columns,
+        feature_profile=feature_profile,
+        point_size=point_size,
+        fixed_move_price=fixed_move_price,
     )
     if not archive_only:
         sync_directory_contents(model_diagnostics_dir, ACTIVE_DIAGNOSTICS_DIR)
