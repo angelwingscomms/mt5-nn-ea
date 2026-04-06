@@ -21,7 +21,13 @@ except ModuleNotFoundError:
         return iterable
 
 from mamba_lite import MambaLiteClassifier
-from minirocket_classifier import MiniRocketClassifier, fit_minirocket, transform_sequences
+from minirocket_classifier import (
+    MiniRocketClassifier,
+    MiniRocketMultiAttentionHead,
+    fit_minirocket,
+    transform_sequence_tokens,
+    transform_sequences,
+)
 from model_archive import (
     ACTIVE_DIAGNOSTICS_DIR,
     ACTIVE_MODEL_CONFIG_PATH,
@@ -59,6 +65,8 @@ DEFAULT_MAMBA_LR = 6e-4
 DEFAULT_MINIROCKET_LR = 1e-4
 DEFAULT_MAMBA_WEIGHT_DECAY = 1e-4
 DEFAULT_MINIROCKET_WEIGHT_DECAY = 0.0
+DEFAULT_MINIROCKET_ATTENTION_DIM = 128
+DEFAULT_MINIROCKET_ATTENTION_HEADS = 4
 DEFAULT_CONFIDENCE_SEARCH_MIN = 0.40
 DEFAULT_CONFIDENCE_SEARCH_MAX = 0.99
 DEFAULT_CONFIDENCE_SEARCH_STEPS = 60
@@ -164,6 +172,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_MINIROCKET_FEATURES,
         help="Approximate number of MiniRocket PPV features to use when -me is enabled.",
+    )
+    parser.add_argument(
+        "--minirocket-attention-dim",
+        type=int,
+        default=DEFAULT_MINIROCKET_ATTENTION_DIM,
+        help="Hidden size for the MiniRocket multiattention head.",
+    )
+    parser.add_argument(
+        "--minirocket-attention-heads",
+        type=int,
+        default=DEFAULT_MINIROCKET_ATTENTION_HEADS,
+        help="Number of attention heads in the MiniRocket multiattention head.",
     )
     parser.add_argument(
         "--metaeditor-path",
@@ -1002,62 +1022,64 @@ def main() -> None:
             num_features=args.minirocket_features,
             seed=42,
         )
-        train_features = transform_sequences(
+        train_tokens = transform_sequence_tokens(
             minirocket_parameters,
             x_train,
             batch_size=transform_batch_size,
             device=device,
         )
-        val_features = transform_sequences(
+        val_tokens = transform_sequence_tokens(
             minirocket_parameters,
             x_val,
             batch_size=transform_batch_size,
             device=device,
         )
-        test_features = transform_sequences(
+        test_tokens = transform_sequence_tokens(
             minirocket_parameters,
             x_test,
             batch_size=transform_batch_size,
             device=device,
         )
 
-        feature_mean = train_features.mean(axis=0).astype(np.float32)
-        feature_std = np.where(train_features.std(axis=0) < 1e-6, 1.0, train_features.std(axis=0)).astype(
-            np.float32
-        )
-        train_features -= feature_mean
-        train_features /= feature_std
-        val_features -= feature_mean
-        val_features /= feature_std
-        test_features -= feature_mean
-        test_features /= feature_std
+        token_mean = train_tokens.mean(axis=0).astype(np.float32)
+        token_std = np.where(train_tokens.std(axis=0) < 1e-6, 1.0, train_tokens.std(axis=0)).astype(np.float32)
+        train_tokens -= token_mean
+        train_tokens /= token_std
+        val_tokens -= token_mean
+        val_tokens /= token_std
+        test_tokens -= token_mean
+        test_tokens /= token_std
 
-        training_model = nn.Linear(train_features.shape[1], len(LABEL_NAMES)).to(device)
-        nn.init.zeros_(training_model.weight)
-        nn.init.zeros_(training_model.bias)
+        training_model = MiniRocketMultiAttentionHead(
+            num_tokens=train_tokens.shape[1],
+            token_dim=train_tokens.shape[2],
+            n_classes=len(LABEL_NAMES),
+            model_dim=args.minirocket_attention_dim,
+            num_heads=args.minirocket_attention_heads,
+        ).to(device)
         learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MINIROCKET_LR
         weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MINIROCKET_WEIGHT_DECAY
-        optimizer = torch.optim.Adam(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             factor=0.5,
             min_lr=1e-8,
             patience=max(1, args.patience // 2),
         )
-        train_loader = make_loader(train_features, y_train, args.batch_size, shuffle=True)
+        train_loader = make_loader(train_tokens, y_train, args.batch_size, shuffle=True)
         val_loader = make_loader(
-            val_features,
+            val_tokens,
             y_val,
             max(args.batch_size, DEFAULT_BATCH_SIZE),
             shuffle=False,
         )
         test_loader = make_loader(
-            test_features,
+            test_tokens,
             y_test,
             max(args.batch_size, DEFAULT_BATCH_SIZE),
             shuffle=False,
         )
-        model_backend = "minirocket-multivariate"
+        model_backend = "minirocket-multivariate-attention"
     else:
         learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MAMBA_LR
         weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MAMBA_WEIGHT_DECAY
@@ -1185,9 +1207,12 @@ def main() -> None:
     if args.use_minirocket_encoder:
         export_model = MiniRocketClassifier(
             parameters=minirocket_parameters,
-            feature_mean=feature_mean,
-            feature_std=feature_std,
             n_classes=len(LABEL_NAMES),
+            token_mean=token_mean,
+            token_std=token_std,
+            head_type="multiattention",
+            attention_dim=args.minirocket_attention_dim,
+            attention_heads=args.minirocket_attention_heads,
         )
         export_model.head.load_state_dict(training_model.state_dict())
     else:

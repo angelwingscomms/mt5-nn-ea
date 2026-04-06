@@ -29,6 +29,20 @@ class MiniRocketTransformParameters:
     def num_features(self) -> int:
         return int(len(self.biases))
 
+    @property
+    def num_tokens(self) -> int:
+        return int(len(self.dilations))
+
+    @property
+    def max_features_per_dilation(self) -> int:
+        if len(self.num_features_per_dilation) == 0:
+            return 0
+        return int(np.max(self.num_features_per_dilation))
+
+    @property
+    def token_feature_dim(self) -> int:
+        return int(len(KERNEL_INDICES) * self.max_features_per_dilation)
+
 
 def _fit_dilations(
     input_length: int,
@@ -187,13 +201,19 @@ class MiniRocketFeatureExtractor(nn.Module):
         parameters: MiniRocketTransformParameters,
         feature_mean: np.ndarray | None = None,
         feature_std: np.ndarray | None = None,
+        token_mean: np.ndarray | None = None,
+        token_std: np.ndarray | None = None,
     ):
         super().__init__()
         self.num_channels = int(parameters.num_channels)
         self.input_length = int(parameters.input_length)
         self.num_features = int(parameters.num_features)
+        self.num_kernels = len(KERNEL_INDICES)
         self.dilations = [int(v) for v in parameters.dilations.tolist()]
         self.num_features_per_dilation = [int(v) for v in parameters.num_features_per_dilation.tolist()]
+        self.num_tokens = int(parameters.num_tokens)
+        self.max_features_per_dilation = int(parameters.max_features_per_dilation)
+        self.token_feature_dim = int(parameters.token_feature_dim)
         self.backend_name = "minirocket-multivariate"
 
         depthwise_weight = (
@@ -237,13 +257,22 @@ class MiniRocketFeatureExtractor(nn.Module):
         self.register_buffer("feature_mean", torch.from_numpy(np.asarray(feature_mean, dtype=np.float32)))
         self.register_buffer("feature_std", torch.from_numpy(np.asarray(feature_std, dtype=np.float32)))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if token_mean is None:
+            token_mean = np.zeros((self.num_tokens, self.token_feature_dim), dtype=np.float32)
+        if token_std is None:
+            token_std = np.ones((self.num_tokens, self.token_feature_dim), dtype=np.float32)
+        token_std = np.where(np.asarray(token_std, dtype=np.float32) < 1e-6, 1.0, token_std)
+        self.register_buffer("token_mean", torch.from_numpy(np.asarray(token_mean, dtype=np.float32)))
+        self.register_buffer("token_std", torch.from_numpy(np.asarray(token_std, dtype=np.float32)))
+
+    def _extract_raw_features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if x.ndim != 3:
             raise ValueError("MiniRocketFeatureExtractor expects [batch, seq_len, features] input.")
 
         x_channels_first = x.transpose(1, 2).contiguous()
         batch_size = x_channels_first.shape[0]
-        features: list[torch.Tensor] = []
+        flat_features: list[torch.Tensor] = []
+        token_features: list[torch.Tensor] = []
 
         for dilation_index, dilation in enumerate(self.dilations):
             padding = ((9 - 1) * dilation) // 2
@@ -254,45 +283,152 @@ class MiniRocketFeatureExtractor(nn.Module):
                 dilation=dilation,
                 groups=self.num_channels,
             )
-            conv = conv.view(batch_size, self.num_channels, len(KERNEL_INDICES), -1).permute(0, 2, 1, 3)
+            conv = conv.view(batch_size, self.num_channels, self.num_kernels, -1).permute(0, 2, 1, 3)
             response = (conv * getattr(self, f"channel_mask_{dilation_index}").unsqueeze(0)).sum(dim=2)
             bias_matrix = getattr(self, f"bias_matrix_{dilation_index}")
             should_trim = padding > 0 and (self.input_length - (2 * padding)) > 0
+            token_block = x.new_zeros((batch_size, self.num_kernels, self.max_features_per_dilation))
 
-            for kernel_index in range(len(KERNEL_INDICES)):
+            for kernel_index in range(self.num_kernels):
                 kernel_response = response[:, kernel_index, :]
                 if (dilation_index + kernel_index) % 2 == 1 and should_trim:
                     kernel_response = kernel_response[:, padding:-padding]
                 kernel_biases = bias_matrix[kernel_index].view(1, -1, 1)
                 kernel_features = (kernel_response.unsqueeze(1) > kernel_biases).to(x.dtype).mean(dim=-1)
-                features.append(kernel_features)
+                flat_features.append(kernel_features)
+                token_block[:, kernel_index, : kernel_features.shape[1]] = kernel_features
 
-        output = torch.cat(features, dim=1)
+            token_features.append(token_block.reshape(batch_size, -1))
+
+        flat_output = torch.cat(flat_features, dim=1)
+        token_output = torch.stack(token_features, dim=1)
+        return flat_output, token_output
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output, _token_output = self._extract_raw_features(x)
         return (output - self.feature_mean) / self.feature_std
+
+    def encode_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        _flat_output, token_output = self._extract_raw_features(x)
+        return (token_output - self.token_mean) / self.token_std
+
+
+class MiniRocketMultiAttentionHead(nn.Module):
+    def __init__(
+        self,
+        num_tokens: int,
+        token_dim: int,
+        n_classes: int = 3,
+        model_dim: int = 128,
+        num_heads: int = 4,
+    ):
+        super().__init__()
+        if num_tokens <= 0:
+            raise ValueError("MiniRocketMultiAttentionHead requires at least one token.")
+        if token_dim <= 0:
+            raise ValueError("MiniRocketMultiAttentionHead requires token_dim > 0.")
+        if num_heads <= 0:
+            raise ValueError("MiniRocketMultiAttentionHead requires num_heads > 0.")
+
+        self.num_tokens = int(num_tokens)
+        self.token_dim = int(token_dim)
+        self.num_heads = int(num_heads)
+        self.model_dim = max(self.num_heads, int(model_dim))
+        if self.model_dim % self.num_heads != 0:
+            self.model_dim += self.num_heads - (self.model_dim % self.num_heads)
+        self.head_dim = self.model_dim // self.num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.token_projection = nn.Linear(self.token_dim, self.model_dim)
+        self.position_embedding = nn.Parameter(torch.zeros(1, self.num_tokens, self.model_dim))
+        self.norm1 = nn.LayerNorm(self.model_dim)
+        self.q_proj = nn.Linear(self.model_dim, self.model_dim)
+        self.k_proj = nn.Linear(self.model_dim, self.model_dim)
+        self.v_proj = nn.Linear(self.model_dim, self.model_dim)
+        self.out_proj = nn.Linear(self.model_dim, self.model_dim)
+        self.norm2 = nn.LayerNorm(self.model_dim)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(self.model_dim, self.model_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.model_dim * 2, self.model_dim),
+        )
+        self.pool_projection = nn.Linear(self.model_dim, 1)
+        self.classifier = nn.Linear(self.model_dim * 2, n_classes)
+
+    def _self_attention(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, num_tokens, _channels = x.shape
+        q = self.q_proj(x).view(batch_size, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, num_tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        attention_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attention_probs = torch.softmax(attention_scores, dim=-1)
+        attended = torch.matmul(attention_probs, v)
+        attended = attended.transpose(1, 2).contiguous().view(batch_size, num_tokens, self.model_dim)
+        return self.out_proj(attended)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        if tokens.ndim != 3:
+            raise ValueError("MiniRocketMultiAttentionHead expects [batch, tokens, token_dim] input.")
+
+        x = self.token_projection(tokens) + self.position_embedding[:, : tokens.shape[1]]
+        x = x + self._self_attention(self.norm1(x))
+        x = x + self.feed_forward(self.norm2(x))
+        pool_weights = torch.softmax(self.pool_projection(x).squeeze(-1), dim=-1)
+        pooled = torch.sum(x * pool_weights.unsqueeze(-1), dim=1)
+        summary = x.mean(dim=1)
+        return self.classifier(torch.cat([pooled, summary], dim=1))
 
 
 class MiniRocketClassifier(nn.Module):
     def __init__(
         self,
         parameters: MiniRocketTransformParameters,
-        feature_mean: np.ndarray,
-        feature_std: np.ndarray,
+        feature_mean: np.ndarray | None = None,
+        feature_std: np.ndarray | None = None,
         n_classes: int = 3,
+        token_mean: np.ndarray | None = None,
+        token_std: np.ndarray | None = None,
+        head_type: str = "multiattention",
+        attention_dim: int = 128,
+        attention_heads: int = 4,
     ):
         super().__init__()
-        self.backend_name = "minirocket-multivariate"
+        self.head_type = str(head_type)
+        self.backend_name = (
+            "minirocket-multivariate-attention"
+            if self.head_type == "multiattention"
+            else "minirocket-multivariate"
+        )
         self.extractor = MiniRocketFeatureExtractor(
             parameters=parameters,
             feature_mean=feature_mean,
             feature_std=feature_std,
+            token_mean=token_mean,
+            token_std=token_std,
         )
-        self.head = nn.Linear(self.extractor.num_features, n_classes)
+        if self.head_type == "linear":
+            self.head = nn.Linear(self.extractor.num_features, n_classes)
+        elif self.head_type == "multiattention":
+            self.head = MiniRocketMultiAttentionHead(
+                num_tokens=self.extractor.num_tokens,
+                token_dim=self.extractor.token_feature_dim,
+                n_classes=n_classes,
+                model_dim=attention_dim,
+                num_heads=attention_heads,
+            )
+        else:
+            raise ValueError(f"Unsupported MiniRocket head_type: {self.head_type}")
 
     def encode_features(self, x: torch.Tensor) -> torch.Tensor:
         return self.extractor(x)
 
+    def encode_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        return self.extractor.encode_tokens(x)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.encode_features(x))
+        if self.head_type == "linear":
+            return self.head(self.encode_features(x))
+        return self.head(self.encode_tokens(x))
 
 
 @torch.no_grad()
@@ -313,10 +449,30 @@ def transform_sequences(
     return np.concatenate(features, axis=0).astype(np.float32, copy=False)
 
 
+@torch.no_grad()
+def transform_sequence_tokens(
+    parameters: MiniRocketTransformParameters,
+    sequences: np.ndarray,
+    batch_size: int = 512,
+    device: str | torch.device = "cpu",
+) -> np.ndarray:
+    extractor = MiniRocketFeatureExtractor(parameters=parameters).to(device)
+    extractor.eval()
+    features: list[np.ndarray] = []
+    for start in range(0, len(sequences), batch_size):
+        batch = torch.from_numpy(sequences[start : start + batch_size]).to(device)
+        features.append(extractor.encode_tokens(batch).cpu().numpy())
+    if not features:
+        return np.empty((0, extractor.num_tokens, extractor.token_feature_dim), dtype=np.float32)
+    return np.concatenate(features, axis=0).astype(np.float32, copy=False)
+
+
 __all__ = [
     "MiniRocketClassifier",
     "MiniRocketFeatureExtractor",
+    "MiniRocketMultiAttentionHead",
     "MiniRocketTransformParameters",
     "fit_minirocket",
+    "transform_sequence_tokens",
     "transform_sequences",
 ]
