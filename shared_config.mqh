@@ -31,7 +31,7 @@
 
 // Fixed stop/target distance in absolute price units, used when the trainer runs with -r
 // and when live.mq5 input R is true.
-#define DEFAULT_FIXED_MOVE 1.44
+#define DEFAULT_FIXED_MOVE 144
 
 // Training labels: ATR multipliers used in the default ATR-risk mode.
 #define LABEL_SL_MULTIPLIER 5.4
