@@ -5,20 +5,10 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
-
-
-class SequenceInstanceNorm(nn.Module):
-    def __init__(self, n_features: int, eps: float = 1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(n_features))
-        self.bias = nn.Parameter(torch.zeros(n_features))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mean = x.mean(dim=1, keepdim=True)
-        var = x.var(dim=1, keepdim=True, unbiased=False)
-        x = (x - mean) / torch.sqrt(var + self.eps)
-        return x * self.weight.view(1, 1, -1) + self.bias.view(1, 1, -1)
+from sequence_models import (
+    SequenceInstanceNorm,
+    SequenceMultiAttentionHead,
+)
 
 
 class RMSNorm(nn.Module):
@@ -130,129 +120,6 @@ class MambaLiteResidualBlock(nn.Module):
         return x + self.dropout(self.mixer(self.norm(x)))
 
 
-class SequenceAttentionBlock(nn.Module):
-    def __init__(self, model_dim: int, num_heads: int, dropout: float = 0.1):
-        super().__init__()
-        self.num_heads = int(num_heads)
-        self.model_dim = max(self.num_heads, int(model_dim))
-        if self.model_dim % self.num_heads != 0:
-            self.model_dim += self.num_heads - (self.model_dim % self.num_heads)
-        self.head_dim = self.model_dim // self.num_heads
-        self.scale = self.head_dim ** -0.5
-
-        self.norm1 = nn.LayerNorm(self.model_dim)
-        self.q_proj = nn.Linear(self.model_dim, self.model_dim)
-        self.k_proj = nn.Linear(self.model_dim, self.model_dim)
-        self.v_proj = nn.Linear(self.model_dim, self.model_dim)
-        self.out_proj = nn.Linear(self.model_dim, self.model_dim)
-        self.attention_dropout = nn.Dropout(dropout)
-        self.residual_dropout = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(self.model_dim)
-        self.feed_forward = nn.Sequential(
-            nn.Linear(self.model_dim, self.model_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.model_dim * 2, self.model_dim),
-        )
-
-    def _self_attention(self, x: torch.Tensor) -> torch.Tensor:
-        batch_size, seq_len, _channels = x.shape
-        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        attention_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attention_probs = self.attention_dropout(torch.softmax(attention_scores, dim=-1))
-        attended = torch.matmul(attention_probs, v)
-        attended = attended.transpose(1, 2).contiguous().view(batch_size, seq_len, self.model_dim)
-        return self.out_proj(attended)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.residual_dropout(self._self_attention(self.norm1(x)))
-        x = x + self.residual_dropout(self.feed_forward(self.norm2(x)))
-        return x
-
-
-class SequenceMultiAttentionHead(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden: int,
-        n_classes: int = 3,
-        num_heads: int = 4,
-        num_layers: int = 2,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        if input_dim <= 0:
-            raise ValueError("SequenceMultiAttentionHead requires input_dim > 0.")
-        if num_heads <= 0:
-            raise ValueError("SequenceMultiAttentionHead requires num_heads > 0.")
-        if num_layers <= 0:
-            raise ValueError("SequenceMultiAttentionHead requires num_layers > 0.")
-
-        self.input_dim = int(input_dim)
-        self.num_heads = int(num_heads)
-        self.model_dim = max(self.num_heads, self.input_dim)
-        if self.model_dim % self.num_heads != 0:
-            self.model_dim += self.num_heads - (self.model_dim % self.num_heads)
-
-        self.input_projection = (
-            nn.Linear(self.input_dim, self.model_dim) if self.model_dim != self.input_dim else nn.Identity()
-        )
-        self.layers = nn.ModuleList(
-            SequenceAttentionBlock(
-                model_dim=self.model_dim,
-                num_heads=self.num_heads,
-                dropout=dropout,
-            )
-            for _ in range(int(num_layers))
-        )
-        self.pool_projection = nn.Linear(self.model_dim, 1)
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(self.model_dim * 2),
-            nn.Linear(self.model_dim * 2, hidden),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, n_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3:
-            raise ValueError("SequenceMultiAttentionHead expects [batch, seq_len, channels] input.")
-
-        x = self.input_projection(x)
-        for layer in self.layers:
-            x = layer(x)
-        pool_weights = torch.softmax(self.pool_projection(x).squeeze(-1), dim=-1)
-        pooled = torch.sum(x * pool_weights.unsqueeze(-1), dim=1)
-        summary = x.mean(dim=1)
-        return self.classifier(torch.cat([pooled, summary], dim=1))
-
-
-class CastorTemporalBlock(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        expand: int = 2,
-        kernel_size: int = 5,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.norm = RMSNorm(d_model)
-        self.d_inner = d_model * expand
-        self.in_proj = nn.Linear(d_model, self.d_inner * 2)
-        self.conv = CausalDepthwiseConv1d(self.d_inner, kernel_size=kernel_size)
-        self.out_proj = nn.Linear(self.d_inner, d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
-        x_branch, gate_branch = self.in_proj(self.norm(x)).chunk(2, dim=-1)
-        x_branch = F.gelu(self.conv(x_branch))
-        x_branch = x_branch * torch.sigmoid(gate_branch)
-        return residual + self.dropout(self.out_proj(x_branch))
-
-
 class MambaLiteClassifier(nn.Module):
     def __init__(
         self,
@@ -313,72 +180,12 @@ class MambaLiteClassifier(nn.Module):
         return self.head(encoded[:, -1, :])
 
 
-class CastorClassifier(nn.Module):
-    def __init__(
-        self,
-        n_features: int,
-        d_model: int = 48,
-        hidden: int = 96,
-        n_classes: int = 3,
-        dropout: float = 0.1,
-        n_layers: int = 3,
-        kernel_size: int = 5,
-        use_multihead_attention: bool = False,
-        attention_heads: int = 4,
-        attention_layers: int = 2,
-        attention_dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.use_multihead_attention = bool(use_multihead_attention)
-        self.backend_name = "castor-lite-attention" if self.use_multihead_attention else "castor-lite"
-        self.sequence_norm = SequenceInstanceNorm(n_features)
-        self.embedding = nn.Linear(n_features, d_model) if d_model != n_features else nn.Identity()
-        self.layers = nn.ModuleList(
-            CastorTemporalBlock(
-                d_model=d_model,
-                kernel_size=kernel_size,
-                dropout=dropout,
-            )
-            for _ in range(n_layers)
-        )
-        self.norm = RMSNorm(d_model)
-        if self.use_multihead_attention:
-            self.head = SequenceMultiAttentionHead(
-                input_dim=d_model,
-                hidden=hidden,
-                n_classes=n_classes,
-                num_heads=attention_heads,
-                num_layers=attention_layers,
-                dropout=attention_dropout,
-            )
-        else:
-            self.head = nn.Sequential(
-                nn.Linear(d_model, hidden),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden, n_classes),
-            )
-
-    def encode_sequence(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.sequence_norm(x)
-        x = self.embedding(x)
-        for layer in self.layers:
-            x = layer(x)
-        return self.norm(x)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        encoded = self.encode_sequence(x)
-        if self.use_multihead_attention:
-            return self.head(encoded)
-        return self.head(encoded[:, -1, :])
-
-
 GoldMambaLiteClassifier = MambaLiteClassifier
 
 __all__ = [
-    "CastorClassifier",
+    "CausalDepthwiseConv1d",
     "GoldMambaLiteClassifier",
     "MambaLiteClassifier",
-    "SequenceAttentionBlock",
+    "RMSNorm",
     "SequenceMultiAttentionHead",
 ]

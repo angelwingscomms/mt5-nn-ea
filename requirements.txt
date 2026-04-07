@@ -1,5 +1,7 @@
+chronos-forecasting>=2.2,<3
 numpy>=1.26.0
 onnx>=1.16.0
+onnxscript>=0.1.0
 pandas>=2.2.0
 torch>=2.5.0
 tqdm>=4.66.0

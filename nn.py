@@ -4,9 +4,11 @@ import argparse
 import logging
 import re
 import shutil
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -20,7 +22,13 @@ except ModuleNotFoundError:
     def tqdm(iterable, **_kwargs):
         return iterable
 
-from mamba_lite import CastorClassifier, MambaLiteClassifier
+from chronos_backend import (
+    CHRONOS_BOLT_MODEL_IDS,
+    DEFAULT_CHRONOS_BOLT_MODEL_ID,
+    load_chronos_bolt_barrier_model,
+)
+from castor_lite import CastorClassifier
+from mamba_lite import MambaLiteClassifier
 from minirocket_classifier import (
     MiniRocketClassifier,
     MiniRocketMultiAttentionHead,
@@ -36,14 +44,16 @@ from model_archive import (
     DEFAULT_METAEDITOR_PATH,
     compile_live_expert,
     ensure_default_test_config,
-    format_model_stamp,
+    format_model_dir_name,
     load_define_file,
     read_text_best_effort,
+    sanitize_model_name,
     set_live_model_reference,
     symbol_models_dir,
     sync_directory_contents,
 )
 from mt5_runtime import resolve_mt5_runtime
+from sequence_models import RecurrentSequenceClassifier, TCNClassifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,15 +70,21 @@ DEFAULT_MINIROCKET_FEATURES = 10_080
 DEFAULT_FOCAL_GAMMA = 2.0
 DEFAULT_MIN_SELECTED_TRADES = 12
 DEFAULT_MIN_TRADE_PRECISION = 0.50
-DISABLE_TRADING_CONFIDENCE = 1.01
 DEFAULT_MAMBA_LR = 6e-4
 DEFAULT_MINIROCKET_LR = 1e-4
+DEFAULT_SEQUENCE_LR = 1e-3
 DEFAULT_MAMBA_WEIGHT_DECAY = 1e-4
 DEFAULT_MINIROCKET_WEIGHT_DECAY = 0.0
+DEFAULT_SEQUENCE_WEIGHT_DECAY = 1e-4
 DEFAULT_MINIROCKET_ATTENTION_DIM = 128
 DEFAULT_ATTENTION_HEADS = 4
 DEFAULT_ATTENTION_LAYERS = 2
 DEFAULT_ATTENTION_DROPOUT = 0.1
+DEFAULT_SEQUENCE_HIDDEN_SIZE = 64
+DEFAULT_SEQUENCE_LAYERS = 2
+DEFAULT_SEQUENCE_DROPOUT = 0.1
+DEFAULT_TCN_LEVELS = 4
+DEFAULT_TCN_KERNEL_SIZE = 3
 DEFAULT_CONFIDENCE_SEARCH_MIN = 0.40
 DEFAULT_CONFIDENCE_SEARCH_MAX = 0.99
 DEFAULT_CONFIDENCE_SEARCH_STEPS = 60
@@ -178,6 +194,8 @@ def feature_macro_name(feature_name: str) -> str:
 
 
 def resolve_feature_columns(architecture: str, use_extended_features: bool) -> tuple[str, ...]:
+    if architecture == "chronos_bolt":
+        return BASE_FEATURE_COLUMNS
     if not use_extended_features:
         return BASE_FEATURE_COLUMNS
     if architecture == "minirocket":
@@ -186,6 +204,8 @@ def resolve_feature_columns(architecture: str, use_extended_features: bool) -> t
 
 
 def resolve_feature_profile(architecture: str, use_extended_features: bool) -> str:
+    if architecture == "chronos_bolt":
+        return "chronos_bolt_ret1_core"
     if not use_extended_features:
         return "core"
     if architecture == "minirocket":
@@ -199,6 +219,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-file", type=str, default=DEFAULT_DATA_FILE, help="CSV with time_msc,bid,ask.")
     parser.add_argument("--output-file", type=str, default=DEFAULT_OUTPUT_FILE, help="ONNX output file.")
+    parser.add_argument(
+        "--name",
+        type=str,
+        default="",
+        help="Optional model folder prefix. Archives become {name}-{date} and add -fail when the quality gate misses.",
+    )
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS, help="Maximum training epochs.")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="Training batch size.")
     parser.add_argument(
@@ -241,7 +267,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Enable 27 extra architecture-aware market features. MiniRocket gets a shape/microstructure-heavy "
-            "pack; Mamba/Castor get an indicator/regime-heavy pack."
+            "pack; the sequence encoders (Mamba, Castor, ELA, BiLSTM, GRU, TCN) get an indicator/regime-heavy pack."
         ),
     )
     architecture_group = parser.add_mutually_exclusive_group()
@@ -256,6 +282,62 @@ def parse_args() -> argparse.Namespace:
         "--use-castor-encoder",
         action="store_true",
         help="Use the Castor temporal encoder instead of the default Mamba-lite model.",
+    )
+    architecture_group.add_argument(
+        "--ela",
+        action="store_true",
+        help="Use the ELA encoder: an LSTM backbone with the repo's multihead attention head.",
+    )
+    architecture_group.add_argument(
+        "--bilstm",
+        "--use-bilstm-encoder",
+        dest="use_bilstm_encoder",
+        action="store_true",
+        help="Use a bidirectional LSTM encoder. Combine with -a to add the attention head.",
+    )
+    architecture_group.add_argument(
+        "--gru",
+        "--use-gru-encoder",
+        dest="use_gru_encoder",
+        action="store_true",
+        help="Use a GRU encoder. Combine with -a to add the attention head.",
+    )
+    architecture_group.add_argument(
+        "--tcn",
+        "--use-tcn-encoder",
+        dest="use_tcn_encoder",
+        action="store_true",
+        help="Use a dilated causal temporal convolutional network. Combine with -a to add the attention head.",
+    )
+    architecture_group.add_argument(
+        "--chronos-bolt",
+        "--chronos",
+        dest="use_chronos_bolt",
+        action="store_true",
+        help="Use an official Chronos-Bolt checkpoint as a zero-shot univariate forecasting backend.",
+    )
+    parser.add_argument(
+        "--chronos-bolt-model",
+        type=str,
+        default=DEFAULT_CHRONOS_BOLT_MODEL_ID,
+        choices=CHRONOS_BOLT_MODEL_IDS,
+        help="Chronos-Bolt checkpoint to use. Defaults to the tiny variant for low-memory machines.",
+    )
+    chronos_context_group = parser.add_mutually_exclusive_group()
+    chronos_context_group.add_argument(
+        "--chronos-patch-aligned-context",
+        action="store_true",
+        help="Trim the live context to the largest tail that exactly fits Chronos-Bolt's patch size.",
+    )
+    chronos_context_group.add_argument(
+        "--chronos-auto-context",
+        action="store_true",
+        help="Try a few low-cost Chronos context tails on validation and keep the best one before export.",
+    )
+    chronos_context_group.add_argument(
+        "--chronos-ensemble-contexts",
+        action="store_true",
+        help="Average Chronos probabilities from the full context and the patch-aligned tail.",
     )
     parser.add_argument(
         "-a",
@@ -300,6 +382,36 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_ATTENTION_DROPOUT,
         help="Dropout used inside the attention head when -a is enabled.",
+    )
+    parser.add_argument(
+        "--sequence-hidden-size",
+        type=int,
+        default=DEFAULT_SEQUENCE_HIDDEN_SIZE,
+        help="Hidden size / channel width used by ELA, BiLSTM, GRU, and TCN encoders.",
+    )
+    parser.add_argument(
+        "--sequence-layers",
+        type=int,
+        default=DEFAULT_SEQUENCE_LAYERS,
+        help="Number of stacked recurrent layers used by ELA, BiLSTM, and GRU.",
+    )
+    parser.add_argument(
+        "--sequence-dropout",
+        type=float,
+        default=DEFAULT_SEQUENCE_DROPOUT,
+        help="Dropout used inside the recurrent and TCN classifier heads.",
+    )
+    parser.add_argument(
+        "--tcn-levels",
+        type=int,
+        default=DEFAULT_TCN_LEVELS,
+        help="Number of dilated residual blocks used by --tcn.",
+    )
+    parser.add_argument(
+        "--tcn-kernel-size",
+        type=int,
+        default=DEFAULT_TCN_KERNEL_SIZE,
+        help="Kernel size used by the dilated causal convolutions when --tcn is enabled.",
     )
     parser.add_argument(
         "--metaeditor-path",
@@ -370,6 +482,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_architecture(args: argparse.Namespace) -> str:
+    if args.use_chronos_bolt:
+        return "chronos_bolt"
+    if args.ela:
+        return "ela"
+    if args.use_bilstm_encoder:
+        return "bilstm"
+    if args.use_gru_encoder:
+        return "gru"
+    if args.use_tcn_encoder:
+        return "tcn"
     if args.use_minirocket_encoder:
         return "minirocket"
     if args.use_castor_encoder:
@@ -382,6 +504,95 @@ def resolve_local_path(path_str: str) -> Path:
     if path.is_absolute():
         return path
     return Path(__file__).resolve().parent / path
+
+
+def export_onnx_model(model: nn.Module, dummy_input: torch.Tensor, output_path: Path) -> None:
+    export_attempts = (
+        ("legacy", {"dynamo": False}),
+        ("dynamo", {"dynamo": True}),
+    )
+    last_error: Exception | None = None
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except ValueError:
+                pass
+
+    for exporter_name, exporter_kwargs in export_attempts:
+        try:
+            log.info("ONNX export | trying %s exporter (opset=14)", exporter_name)
+            torch.onnx.export(
+                model,
+                (dummy_input,),
+                str(output_path),
+                input_names=["input"],
+                output_names=["output"],
+                opset_version=14,
+                **exporter_kwargs,
+            )
+            log.info("ONNX export | succeeded with %s exporter", exporter_name)
+            return
+        except ModuleNotFoundError as exc:
+            last_error = exc
+            log.warning("ONNX export | %s exporter missing dependency: %s", exporter_name, exc)
+        except Exception as exc:
+            last_error = exc
+            log.warning("ONNX export | %s exporter failed: %s", exporter_name, exc)
+
+    if last_error is None:
+        raise RuntimeError("ONNX export failed for an unknown reason.")
+    raise RuntimeError(f"ONNX export failed with all available exporters: {last_error}") from last_error
+
+
+def chronos_patch_aligned_tail_length(sequence_length: int, patch_size: int) -> int:
+    if patch_size <= 0:
+        return 0
+    aligned = (int(sequence_length) // int(patch_size)) * int(patch_size)
+    if aligned <= 0 or aligned >= int(sequence_length):
+        return 0
+    return aligned
+
+
+def chronos_context_variants(args: argparse.Namespace, sequence_length: int, patch_size: int) -> tuple[tuple[int, ...], ...]:
+    patch_aligned_tail = chronos_patch_aligned_tail_length(sequence_length, patch_size)
+
+    if args.chronos_auto_context:
+        variants: list[tuple[int, ...]] = [(0,)]
+        if patch_size > 0:
+            tail = (sequence_length // patch_size) * patch_size
+            while tail >= patch_size:
+                variant = (0,) if tail >= sequence_length else (tail,)
+                if variant not in variants:
+                    variants.append(variant)
+                tail -= patch_size
+        return tuple(variants)
+
+    if args.chronos_ensemble_contexts and patch_aligned_tail > 0:
+        return ((0, patch_aligned_tail),)
+
+    if args.chronos_patch_aligned_context and patch_aligned_tail > 0:
+        return ((patch_aligned_tail,),)
+
+    return ((0,),)
+
+
+def chronos_context_label(context_tail_lengths: Sequence[int]) -> str:
+    return "+".join("full" if int(tail_length) <= 0 else str(int(tail_length)) for tail_length in context_tail_lengths)
+
+
+def chronos_context_score(metrics: dict[str, float | int], min_selected: int) -> tuple[float, float, int, float]:
+    selected_trades = int(metrics["selected_trades"])
+    precision = float(metrics["precision"])
+    precision_score = precision if np.isfinite(precision) else -1.0
+    return (
+        float(selected_trades >= min_selected),
+        precision_score,
+        selected_trades,
+        float(metrics["trade_coverage"]),
+    )
 
 
 def compute_tick_signs(prices: np.ndarray) -> np.ndarray:
@@ -910,44 +1121,83 @@ def choose_confidence_threshold(
 ) -> float:
     preds = probs.argmax(axis=1)
     candidate_mask = preds > 0
-    if not candidate_mask.any():
-        log.warning("Confidence gate selection: model produced no BUY/SELL predictions; disabling live trades.")
-        return DISABLE_TRADING_CONFIDENCE
-
-    min_selected = max(1, min_selected)
-    best_threshold = 0.60
-    best_precision = -1.0
-    best_coverage = -1.0
-    confidences = probs.max(axis=1)
-    found_candidate = False
     threshold_min = min(max(0.0, float(threshold_min)), 0.999999)
     threshold_max = min(max(threshold_min, float(threshold_max)), 0.999999)
     threshold_steps = max(2, int(threshold_steps))
+    if not candidate_mask.any():
+        log.warning(
+            "Confidence gate selection: model produced no BUY/SELL predictions; falling back to threshold %.2f.",
+            threshold_min,
+        )
+        return threshold_min
+
+    min_selected = max(1, min_selected)
+    best_threshold = threshold_min
+    best_precision = -1.0
+    best_selected = -1
+    best_coverage = -1.0
+    relaxed_threshold = threshold_min
+    relaxed_precision = -1.0
+    relaxed_selected = -1
+    relaxed_coverage = -1.0
+    confidences = probs.max(axis=1)
+    found_candidate = False
+    found_relaxed_candidate = False
 
     for threshold in np.linspace(threshold_min, threshold_max, threshold_steps):
         selected = candidate_mask & (confidences >= threshold)
-        if selected.sum() < min_selected:
+        selected_count = int(selected.sum())
+        if selected_count == 0:
             continue
-        found_candidate = True
 
         precision = float((preds[selected] == labels[selected]).mean())
         coverage = float(selected.mean())
+        found_relaxed_candidate = True
+        if precision > relaxed_precision + 1e-12 or (
+            abs(precision - relaxed_precision) <= 1e-12
+            and (selected_count > relaxed_selected or (selected_count == relaxed_selected and coverage > relaxed_coverage))
+        ):
+            relaxed_threshold = float(threshold)
+            relaxed_precision = precision
+            relaxed_selected = selected_count
+            relaxed_coverage = coverage
+
+        if selected_count < min_selected:
+            continue
+        found_candidate = True
         if precision > best_precision + 1e-12 or (
-            abs(precision - best_precision) <= 1e-12 and coverage > best_coverage
+            abs(precision - best_precision) <= 1e-12
+            and (selected_count > best_selected or (selected_count == best_selected and coverage > best_coverage))
         ):
             best_threshold = float(threshold)
             best_precision = precision
+            best_selected = selected_count
             best_coverage = coverage
 
-    if not found_candidate:
-        log.warning(
-            "Confidence gate selection: no threshold produced at least %d BUY/SELL trades; disabling live trades.",
-            min_selected,
-        )
-        return DISABLE_TRADING_CONFIDENCE
+    if found_candidate:
+        print("Chosen confidence threshold: %.2f with precision %.4f and coverage %.4f" % (best_threshold, best_precision, best_coverage))
+        return best_threshold
 
-    print ("Chosen confidence threshold: %.2f with precision %.4f and coverage %.4f" % (best_threshold, best_precision, best_coverage))
-    return best_threshold
+    if found_relaxed_candidate:
+        log.warning(
+            "Confidence gate selection: no threshold produced at least %d BUY/SELL trades; "
+            "falling back to threshold %.2f with %d trades and precision %.4f.",
+            min_selected,
+            relaxed_threshold,
+            relaxed_selected,
+            relaxed_precision,
+        )
+        print(
+            "Chosen confidence threshold: %.2f with precision %.4f and coverage %.4f"
+            % (relaxed_threshold, relaxed_precision, relaxed_coverage)
+        )
+        return relaxed_threshold
+
+    log.warning(
+        "Confidence gate selection: no threshold selected any BUY/SELL trades; falling back to threshold %.2f.",
+        threshold_min,
+    )
+    return threshold_min
 
 
 def summarize_gate(name: str, probs: np.ndarray, labels: np.ndarray, threshold: float) -> dict[str, float | int]:
@@ -1217,6 +1467,12 @@ def build_mql_config(
             f"#define MODEL_USE_EXTENDED_FEATURES {1 if use_extended_features else 0}",
             f"#define MODEL_USE_MINIROCKET {1 if architecture == 'minirocket' else 0}",
             f"#define MODEL_USE_CASTOR {1 if architecture == 'castor' else 0}",
+            f"#define MODEL_USE_ELA {1 if architecture == 'ela' else 0}",
+            f"#define MODEL_USE_BILSTM {1 if architecture == 'bilstm' else 0}",
+            f"#define MODEL_USE_GRU {1 if architecture == 'gru' else 0}",
+            f"#define MODEL_USE_TCN {1 if architecture == 'tcn' else 0}",
+            f"#define MODEL_USE_CHRONOS {1 if architecture == 'chronos_bolt' else 0}",
+            f"#define MODEL_USE_CHRONOS_BOLT {1 if architecture == 'chronos_bolt' else 0}",
             f"#define MODEL_USE_MULTIHEAD_ATTENTION {1 if use_multihead_attention else 0}",
             *feature_macro_lines,
             f"#define PRIMARY_CONFIDENCE {primary_confidence:.8f}",
@@ -1227,6 +1483,8 @@ def build_mql_config(
 
 
 def resolve_loss_mode(_architecture: str, requested_mode: str) -> str:
+    if _architecture == "chronos_bolt":
+        return "zero-shot"
     if requested_mode != "auto":
         return requested_mode
     return "focal"
@@ -1238,12 +1496,33 @@ def main() -> None:
     torch.manual_seed(42)
     np.random.seed(42)
     architecture = resolve_architecture(args)
-    feature_columns = resolve_feature_columns(architecture, bool(args.use_extended_features))
-    feature_profile = resolve_feature_profile(architecture, bool(args.use_extended_features))
+    requested_model_name = args.name.strip()
+    model_name = sanitize_model_name(requested_model_name)
+    if requested_model_name and not model_name:
+        log.warning("Model name %r sanitized to empty; using a timestamp-only archive folder.", requested_model_name)
+    elif requested_model_name and model_name != requested_model_name:
+        log.info("Model folder prefix sanitized from %r to %r.", requested_model_name, model_name)
+    use_extended_features = bool(args.use_extended_features)
+    if architecture == "chronos_bolt" and use_extended_features:
+        log.warning("Chronos-Bolt backend uses the base live feature pack; ignoring --use-extended-features.")
+        use_extended_features = False
+    feature_columns = resolve_feature_columns(architecture, use_extended_features)
+    feature_profile = resolve_feature_profile(architecture, use_extended_features)
     feature_count = len(feature_columns)
     use_multihead_attention = bool(args.use_multihead_attention)
     use_atr_risk = not bool(args.use_fixed_risk)
     use_fixed_time_bars = bool(args.use_fixed_time_bars)
+    if architecture == "ela":
+        if not use_multihead_attention:
+            log.info("ELA uses the multihead attention head by design; enabling attention automatically.")
+        use_multihead_attention = True
+    if architecture == "chronos_bolt" and use_multihead_attention:
+        log.warning("Chronos-Bolt backend ignores --use-multihead-attention.")
+        use_multihead_attention = False
+    if architecture != "chronos_bolt" and (
+        args.chronos_patch_aligned_context or args.chronos_auto_context or args.chronos_ensemble_contexts
+    ):
+        log.warning("Chronos context flags are ignored unless --chronos-bolt is enabled.")
     if use_fixed_time_bars and PRIMARY_BAR_SECONDS <= 0:
         raise ValueError("PRIMARY_BAR_SECONDS must be positive.")
     if DEFAULT_FIXED_MOVE <= 0.0:
@@ -1349,222 +1628,394 @@ def main() -> None:
     log.info("Window counts | train=%d val=%d test=%d", len(x_train), len(x_val), len(x_test))
 
     loss_mode = resolve_loss_mode(architecture, args.loss_mode)
-    scheduler = None
     export_model: nn.Module | None = None
-    feature_mean: np.ndarray | None = None
-    feature_std: np.ndarray | None = None
-    token_mean: np.ndarray | None = None
-    token_std: np.ndarray | None = None
-    minirocket_parameters = None
-    train_sample_weights = make_sample_weights(y_train)
 
-    if architecture == "minirocket":
-        transform_batch_size = max(args.batch_size, DEFAULT_BATCH_SIZE)
-        minirocket_parameters = fit_minirocket(
-            x_train.transpose(0, 2, 1),
-            num_features=args.minirocket_features,
-            seed=42,
+    if architecture == "chronos_bolt":
+        if args.loss_mode != "auto":
+            log.warning("Chronos-Bolt backend is zero-shot; ignoring --loss-mode=%s.", args.loss_mode)
+        if args.lr > 0.0 or args.weight_decay >= 0.0:
+            log.warning("Chronos-Bolt backend is zero-shot; ignoring optimizer overrides.")
+        log.info(
+            "Chronos-Bolt backend | model_id=%s feature_profile=%s prediction_length=%d",
+            args.chronos_bolt_model,
+            feature_profile,
+            TARGET_HORIZON,
         )
-        learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MINIROCKET_LR
-        weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MINIROCKET_WEIGHT_DECAY
-
-        if use_multihead_attention:
-            train_inputs = transform_sequence_tokens(
-                minirocket_parameters,
-                x_train,
-                batch_size=transform_batch_size,
-                device=device,
+        chronos_bolt_batch_size = max(1, min(args.batch_size, 16))
+        if chronos_bolt_batch_size != args.batch_size:
+            log.info(
+                "Chronos-Bolt batch size capped to %d tasks to keep CPU memory use predictable.",
+                chronos_bolt_batch_size,
             )
-            val_inputs = transform_sequence_tokens(
-                minirocket_parameters,
-                x_val,
-                batch_size=transform_batch_size,
-                device=device,
-            )
-            test_inputs = transform_sequence_tokens(
-                minirocket_parameters,
-                x_test,
-                batch_size=transform_batch_size,
-                device=device,
-            )
-
-            token_mean = train_inputs.mean(axis=0).astype(np.float32)
-            token_std = np.where(train_inputs.std(axis=0) < 1e-6, 1.0, train_inputs.std(axis=0)).astype(np.float32)
-            train_inputs = ((train_inputs - token_mean) / token_std).astype(np.float32, copy=False)
-            val_inputs = ((val_inputs - token_mean) / token_std).astype(np.float32, copy=False)
-            test_inputs = ((test_inputs - token_mean) / token_std).astype(np.float32, copy=False)
-
-            training_model = MiniRocketMultiAttentionHead(
-                num_tokens=train_inputs.shape[1],
-                token_dim=train_inputs.shape[2],
-                n_classes=len(LABEL_NAMES),
-                model_dim=args.attention_dim,
-                num_heads=args.attention_heads,
-                num_layers=args.attention_layers,
-                dropout=args.attention_dropout,
-            ).to(device)
-            model_backend = "minirocket-multivariate-attention"
-        else:
-            train_inputs = transform_sequences(
-                minirocket_parameters,
-                x_train,
-                batch_size=transform_batch_size,
-                device=device,
-            )
-            val_inputs = transform_sequences(
-                minirocket_parameters,
-                x_val,
-                batch_size=transform_batch_size,
-                device=device,
-            )
-            test_inputs = transform_sequences(
-                minirocket_parameters,
-                x_test,
-                batch_size=transform_batch_size,
-                device=device,
-            )
-
-            feature_mean = train_inputs.mean(axis=0).astype(np.float32)
-            feature_std = np.where(train_inputs.std(axis=0) < 1e-6, 1.0, train_inputs.std(axis=0)).astype(np.float32)
-            train_inputs = ((train_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
-            val_inputs = ((val_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
-            test_inputs = ((test_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
-
-            training_model = nn.Linear(train_inputs.shape[1], len(LABEL_NAMES)).to(device)
-            model_backend = "minirocket-multivariate"
-
-        optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            factor=0.5,
-            min_lr=1e-8,
-            patience=max(1, args.patience // 2),
-        )
-        train_loader = make_loader(
-            train_inputs,
-            y_train,
-            args.batch_size,
-            shuffle=True,
-            sample_weights=train_sample_weights,
-        )
-        val_loader = make_loader(
-            val_inputs,
-            y_val,
-            max(args.batch_size, DEFAULT_BATCH_SIZE),
-            shuffle=False,
-        )
-        test_loader = make_loader(
-            test_inputs,
-            y_test,
-            max(args.batch_size, DEFAULT_BATCH_SIZE),
-            shuffle=False,
-        )
-    else:
-        learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MAMBA_LR
-        weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MAMBA_WEIGHT_DECAY
-        if architecture == "castor":
-            training_model = CastorClassifier(
-                n_features=feature_count,
-                use_multihead_attention=use_multihead_attention,
-                attention_heads=args.attention_heads,
-                attention_layers=args.attention_layers,
-                attention_dropout=args.attention_dropout,
-            ).to(device)
-        else:
-            training_model = MambaLiteClassifier(
-                n_features=feature_count,
-                use_multihead_attention=use_multihead_attention,
-                attention_heads=args.attention_heads,
-                attention_layers=args.attention_layers,
-                attention_dropout=args.attention_dropout,
-            ).to(device)
-        optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        train_loader = make_loader(
-            x_train,
-            y_train,
-            args.batch_size,
-            shuffle=True,
-            sample_weights=train_sample_weights,
-        )
+        export_model = load_chronos_bolt_barrier_model(
+            device=device,
+            model_id=args.chronos_bolt_model,
+            median=median,
+            iqr=iqr,
+            feature_columns=feature_columns,
+            prediction_length=TARGET_HORIZON,
+            use_atr_risk=use_atr_risk,
+            label_tp_multiplier=LABEL_TP_MULTIPLIER,
+            label_sl_multiplier=LABEL_SL_MULTIPLIER,
+            context_tail_lengths=(0,),
+        ).to(device)
         val_loader = make_loader(
             x_val,
             y_val,
-            max(args.batch_size, DEFAULT_BATCH_SIZE),
+            chronos_bolt_batch_size,
             shuffle=False,
         )
         test_loader = make_loader(
             x_test,
             y_test,
-            max(args.batch_size, DEFAULT_BATCH_SIZE),
+            chronos_bolt_batch_size,
             shuffle=False,
         )
-        model_backend = getattr(training_model, "backend_name", "portable-mamba-lite")
+        context_variants = chronos_context_variants(
+            args,
+            sequence_length=SEQ_LEN,
+            patch_size=int(getattr(export_model, "patch_size", 0)),
+        )
+        selected_context_variant = context_variants[0]
 
-    class_weights = make_class_weights(y_train).to(device)
-    if loss_mode == "cross-entropy":
-        criterion: nn.Module = nn.CrossEntropyLoss(weight=class_weights).to(device)
+        if args.chronos_auto_context and len(context_variants) > 1:
+            best_score: tuple[float, float, int, float] | None = None
+            best_val_logits: np.ndarray | None = None
+            best_val_labels: np.ndarray | None = None
+
+            for candidate_context_variant in context_variants:
+                export_model.set_context_tail_lengths(candidate_context_variant)
+                candidate_val_logits, candidate_val_labels = evaluate_model(export_model, val_loader, device)
+                candidate_val_probs = softmax(candidate_val_logits)
+                candidate_threshold = choose_confidence_threshold(
+                    candidate_val_probs,
+                    candidate_val_labels,
+                    min_selected=max(1, args.min_selected_trades),
+                    threshold_min=args.confidence_search_min,
+                    threshold_max=args.confidence_search_max,
+                    threshold_steps=args.confidence_search_steps,
+                )
+                candidate_validation_gate = gate_metrics(candidate_val_labels, candidate_val_probs, candidate_threshold)
+                candidate_score = chronos_context_score(
+                    candidate_validation_gate,
+                    min_selected=max(1, args.min_selected_trades),
+                )
+                log.info(
+                    "Chronos auto-context | candidate=%s threshold=%.2f precision=%s coverage=%.4f trades=%d",
+                    chronos_context_label(candidate_context_variant),
+                    candidate_threshold,
+                    format_metric(float(candidate_validation_gate["precision"])),
+                    float(candidate_validation_gate["trade_coverage"]),
+                    int(candidate_validation_gate["selected_trades"]),
+                )
+                if best_score is None or candidate_score > best_score:
+                    best_score = candidate_score
+                    selected_context_variant = candidate_context_variant
+                    best_val_logits = candidate_val_logits
+                    best_val_labels = candidate_val_labels
+
+            if best_val_logits is None or best_val_labels is None:
+                raise RuntimeError("Chronos auto-context search did not evaluate any candidates.")
+            export_model.set_context_tail_lengths(selected_context_variant)
+            log.info(
+                "Chronos auto-context selected %s.",
+                chronos_context_label(selected_context_variant),
+            )
+            val_logits, val_labels = best_val_logits, best_val_labels
+        else:
+            export_model.set_context_tail_lengths(selected_context_variant)
+            if architecture == "chronos_bolt":
+                log.info(
+                    "Chronos context mode | selected=%s",
+                    chronos_context_label(selected_context_variant),
+                )
+            val_logits, val_labels = evaluate_model(export_model, val_loader, device)
+
+        model_backend = getattr(export_model, "backend_name", "chronos-bolt-zero-shot-close-barrier")
+        test_logits, test_labels = evaluate_model(export_model, test_loader, device)
     else:
-        criterion = FocalLoss(alpha=class_weights, gamma=args.focal_gamma).to(device)
-    log.info(
-        "Optimization | loss=%s lr=%.6g weight_decay=%.6g balanced_sampling=1 confidence_search=[%.2f, %.2f]x%d",
-        loss_mode,
-        learning_rate,
-        weight_decay,
-        args.confidence_search_min,
-        args.confidence_search_max,
-        args.confidence_search_steps,
-    )
+        scheduler = None
+        feature_mean: np.ndarray | None = None
+        feature_std: np.ndarray | None = None
+        token_mean: np.ndarray | None = None
+        token_std: np.ndarray | None = None
+        minirocket_parameters = None
+        train_sample_weights = make_sample_weights(y_train)
 
-    best_state = None
-    best_val_loss = float("inf")
-    wait = 0
+        if architecture == "minirocket":
+            transform_batch_size = max(args.batch_size, DEFAULT_BATCH_SIZE)
+            minirocket_parameters = fit_minirocket(
+                x_train.transpose(0, 2, 1),
+                num_features=args.minirocket_features,
+                seed=42,
+            )
+            learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MINIROCKET_LR
+            weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MINIROCKET_WEIGHT_DECAY
 
-    for epoch in tqdm(range(args.epochs), desc="Training"):
-        training_model.train()
-        train_losses = []
-        for xb, yb in train_loader:
-            logits = training_model(xb.to(device))
-            loss = criterion(logits, yb.to(device))
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(training_model.parameters(), 1.0)
-            optimizer.step()
-            train_losses.append(float(loss.item()))
+            if use_multihead_attention:
+                train_inputs = transform_sequence_tokens(
+                    minirocket_parameters,
+                    x_train,
+                    batch_size=transform_batch_size,
+                    device=device,
+                )
+                val_inputs = transform_sequence_tokens(
+                    minirocket_parameters,
+                    x_val,
+                    batch_size=transform_batch_size,
+                    device=device,
+                )
+                test_inputs = transform_sequence_tokens(
+                    minirocket_parameters,
+                    x_test,
+                    batch_size=transform_batch_size,
+                    device=device,
+                )
+
+                token_mean = train_inputs.mean(axis=0).astype(np.float32)
+                token_std = np.where(train_inputs.std(axis=0) < 1e-6, 1.0, train_inputs.std(axis=0)).astype(np.float32)
+                train_inputs = ((train_inputs - token_mean) / token_std).astype(np.float32, copy=False)
+                val_inputs = ((val_inputs - token_mean) / token_std).astype(np.float32, copy=False)
+                test_inputs = ((test_inputs - token_mean) / token_std).astype(np.float32, copy=False)
+
+                training_model = MiniRocketMultiAttentionHead(
+                    num_tokens=train_inputs.shape[1],
+                    token_dim=train_inputs.shape[2],
+                    n_classes=len(LABEL_NAMES),
+                    model_dim=args.attention_dim,
+                    num_heads=args.attention_heads,
+                    num_layers=args.attention_layers,
+                    dropout=args.attention_dropout,
+                ).to(device)
+                model_backend = "minirocket-multivariate-attention"
+            else:
+                train_inputs = transform_sequences(
+                    minirocket_parameters,
+                    x_train,
+                    batch_size=transform_batch_size,
+                    device=device,
+                )
+                val_inputs = transform_sequences(
+                    minirocket_parameters,
+                    x_val,
+                    batch_size=transform_batch_size,
+                    device=device,
+                )
+                test_inputs = transform_sequences(
+                    minirocket_parameters,
+                    x_test,
+                    batch_size=transform_batch_size,
+                    device=device,
+                )
+
+                feature_mean = train_inputs.mean(axis=0).astype(np.float32)
+                feature_std = np.where(train_inputs.std(axis=0) < 1e-6, 1.0, train_inputs.std(axis=0)).astype(np.float32)
+                train_inputs = ((train_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
+                val_inputs = ((val_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
+                test_inputs = ((test_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
+
+                training_model = nn.Linear(train_inputs.shape[1], len(LABEL_NAMES)).to(device)
+                model_backend = "minirocket-multivariate"
+
+            optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                factor=0.5,
+                min_lr=1e-8,
+                patience=max(1, args.patience // 2),
+            )
+            train_loader = make_loader(
+                train_inputs,
+                y_train,
+                args.batch_size,
+                shuffle=True,
+                sample_weights=train_sample_weights,
+            )
+            val_loader = make_loader(
+                val_inputs,
+                y_val,
+                max(args.batch_size, DEFAULT_BATCH_SIZE),
+                shuffle=False,
+            )
+            test_loader = make_loader(
+                test_inputs,
+                y_test,
+                max(args.batch_size, DEFAULT_BATCH_SIZE),
+                shuffle=False,
+            )
+        else:
+            if architecture in {"ela", "bilstm", "gru", "tcn"}:
+                learning_rate = args.lr if args.lr > 0.0 else DEFAULT_SEQUENCE_LR
+                weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_SEQUENCE_WEIGHT_DECAY
+                if architecture == "tcn":
+                    training_model = TCNClassifier(
+                        n_features=feature_count,
+                        channels=args.sequence_hidden_size,
+                        hidden=max(args.sequence_hidden_size, feature_count * 4),
+                        dropout=args.sequence_dropout,
+                        n_layers=args.tcn_levels,
+                        kernel_size=args.tcn_kernel_size,
+                        use_multihead_attention=use_multihead_attention,
+                        attention_heads=args.attention_heads,
+                        attention_layers=args.attention_layers,
+                        attention_dropout=args.attention_dropout,
+                    ).to(device)
+                else:
+                    recurrent_cell_type = "gru" if architecture == "gru" else "lstm"
+                    recurrent_bidirectional = architecture == "bilstm"
+                    backend_name = {
+                        "ela": "ela-lstm-attention",
+                        "bilstm": "bilstm-attention" if use_multihead_attention else "bilstm",
+                        "gru": "gru-attention" if use_multihead_attention else "gru",
+                    }[architecture]
+                    training_model = RecurrentSequenceClassifier(
+                        n_features=feature_count,
+                        cell_type=recurrent_cell_type,
+                        hidden_size=args.sequence_hidden_size,
+                        hidden=max(args.sequence_hidden_size, feature_count * 4),
+                        dropout=args.sequence_dropout,
+                        num_layers=args.sequence_layers,
+                        bidirectional=recurrent_bidirectional,
+                        use_multihead_attention=use_multihead_attention,
+                        attention_heads=args.attention_heads,
+                        attention_layers=args.attention_layers,
+                        attention_dropout=args.attention_dropout,
+                        backend_name=backend_name,
+                    ).to(device)
+            else:
+                learning_rate = args.lr if args.lr > 0.0 else DEFAULT_MAMBA_LR
+                weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_MAMBA_WEIGHT_DECAY
+                if architecture == "castor":
+                    training_model = CastorClassifier(
+                        n_features=feature_count,
+                        use_multihead_attention=use_multihead_attention,
+                        attention_heads=args.attention_heads,
+                        attention_layers=args.attention_layers,
+                        attention_dropout=args.attention_dropout,
+                    ).to(device)
+                else:
+                    training_model = MambaLiteClassifier(
+                        n_features=feature_count,
+                        use_multihead_attention=use_multihead_attention,
+                        attention_heads=args.attention_heads,
+                        attention_layers=args.attention_layers,
+                        attention_dropout=args.attention_dropout,
+                    ).to(device)
+            optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            train_loader = make_loader(
+                x_train,
+                y_train,
+                args.batch_size,
+                shuffle=True,
+                sample_weights=train_sample_weights,
+            )
+            val_loader = make_loader(
+                x_val,
+                y_val,
+                max(args.batch_size, DEFAULT_BATCH_SIZE),
+                shuffle=False,
+            )
+            test_loader = make_loader(
+                x_test,
+                y_test,
+                max(args.batch_size, DEFAULT_BATCH_SIZE),
+                shuffle=False,
+            )
+            model_backend = getattr(training_model, "backend_name", "portable-mamba-lite")
+
+        class_weights = make_class_weights(y_train).to(device)
+        if loss_mode == "cross-entropy":
+            criterion: nn.Module = nn.CrossEntropyLoss(weight=class_weights).to(device)
+        else:
+            criterion = FocalLoss(alpha=class_weights, gamma=args.focal_gamma).to(device)
+        log.info(
+            "Optimization | loss=%s lr=%.6g weight_decay=%.6g balanced_sampling=1 confidence_search=[%.2f, %.2f]x%d",
+            loss_mode,
+            learning_rate,
+            weight_decay,
+            args.confidence_search_min,
+            args.confidence_search_max,
+            args.confidence_search_steps,
+        )
+
+        best_state = None
+        best_val_loss = float("inf")
+        wait = 0
+
+        for epoch in tqdm(range(args.epochs), desc="Training"):
+            training_model.train()
+            train_losses = []
+            for xb, yb in train_loader:
+                logits = training_model(xb.to(device))
+                loss = criterion(logits, yb.to(device))
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(training_model.parameters(), 1.0)
+                optimizer.step()
+                train_losses.append(float(loss.item()))
+
+            val_logits, val_labels = evaluate_model(training_model, val_loader, device)
+            val_loss = float(
+                criterion(
+                    torch.tensor(val_logits, dtype=torch.float32, device=device),
+                    torch.tensor(val_labels, dtype=torch.long, device=device),
+                ).item()
+            )
+            log.info(
+                "Epoch %02d | train_loss=%.4f val_loss=%.4f wait=%d/%d",
+                epoch,
+                float(np.mean(train_losses)),
+                val_loss,
+                wait,
+                args.patience,
+            )
+            if scheduler is not None:
+                scheduler.step(val_loss)
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.detach().cpu().clone() for k, v in training_model.state_dict().items()}
+                wait = 0
+            else:
+                wait += 1
+                if wait >= args.patience:
+                    break
+
+        if best_state is None:
+            raise RuntimeError("Training did not produce a valid checkpoint.")
+
+        training_model.load_state_dict(best_state)
+        training_model.to(device)
 
         val_logits, val_labels = evaluate_model(training_model, val_loader, device)
-        val_loss = float(
-            criterion(
-                torch.tensor(val_logits, dtype=torch.float32, device=device),
-                torch.tensor(val_labels, dtype=torch.long, device=device),
-            ).item()
-        )
-        log.info(
-            "Epoch %02d | train_loss=%.4f val_loss=%.4f wait=%d/%d",
-            epoch,
-            float(np.mean(train_losses)),
-            val_loss,
-            wait,
-            args.patience,
-        )
-        if scheduler is not None:
-            scheduler.step(val_loss)
+        test_logits, test_labels = evaluate_model(training_model, test_loader, device)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in training_model.state_dict().items()}
-            wait = 0
+        if architecture == "minirocket":
+            if minirocket_parameters is None:
+                raise RuntimeError("MiniRocket export requested without fitted parameters.")
+            if use_multihead_attention:
+                export_model = MiniRocketClassifier(
+                    parameters=minirocket_parameters,
+                    n_classes=len(LABEL_NAMES),
+                    token_mean=token_mean,
+                    token_std=token_std,
+                    head_type="multiattention",
+                    attention_dim=args.attention_dim,
+                    attention_heads=args.attention_heads,
+                    attention_layers=args.attention_layers,
+                    attention_dropout=args.attention_dropout,
+                )
+            else:
+                export_model = MiniRocketClassifier(
+                    parameters=minirocket_parameters,
+                    feature_mean=feature_mean,
+                    feature_std=feature_std,
+                    n_classes=len(LABEL_NAMES),
+                    head_type="linear",
+                )
+            export_model.head.load_state_dict(training_model.state_dict())
         else:
-            wait += 1
-            if wait >= args.patience:
-                break
-
-    if best_state is None:
-        raise RuntimeError("Training did not produce a valid checkpoint.")
-
-    training_model.load_state_dict(best_state)
-    training_model.to(device)
-
-    val_logits, val_labels = evaluate_model(training_model, val_loader, device)
+            export_model = training_model
     val_probs = softmax(val_logits)
     selected_primary_confidence = choose_confidence_threshold(
         val_probs,
@@ -1576,7 +2027,6 @@ def main() -> None:
     )
     validation_gate = summarize_gate("validation", val_probs, val_labels, selected_primary_confidence)
 
-    test_logits, test_labels = evaluate_model(training_model, test_loader, device)
     test_probs = softmax(test_logits)
     holdout_gate = summarize_gate("holdout", test_probs, test_labels, selected_primary_confidence)
 
@@ -1597,43 +2047,22 @@ def main() -> None:
     quality_gate_reason = "; ".join(quality_gate_reasons)
     deployed_primary_confidence = selected_primary_confidence
     if not quality_gate_passed:
-        deployed_primary_confidence = DISABLE_TRADING_CONFIDENCE
         log.warning(
-            "Model failed the live quality gate (%s). Deploying with PRIMARY_CONFIDENCE=%.2f to disable live trading.",
+            "Model failed the live quality gate (%s). Keeping PRIMARY_CONFIDENCE=%.2f and marking the archive folder with -fail.",
             quality_gate_reason,
             deployed_primary_confidence,
         )
 
-    if architecture == "minirocket":
-        if minirocket_parameters is None:
-            raise RuntimeError("MiniRocket export requested without fitted parameters.")
-        if use_multihead_attention:
-            export_model = MiniRocketClassifier(
-                parameters=minirocket_parameters,
-                n_classes=len(LABEL_NAMES),
-                token_mean=token_mean,
-                token_std=token_std,
-                head_type="multiattention",
-                attention_dim=args.attention_dim,
-                attention_heads=args.attention_heads,
-                attention_layers=args.attention_layers,
-                attention_dropout=args.attention_dropout,
-            )
-        else:
-            export_model = MiniRocketClassifier(
-                parameters=minirocket_parameters,
-                feature_mean=feature_mean,
-                feature_std=feature_std,
-                n_classes=len(LABEL_NAMES),
-                head_type="linear",
-            )
-        export_model.head.load_state_dict(training_model.state_dict())
-    else:
-        export_model = training_model
+    if export_model is None:
+        raise RuntimeError("Model export path was not initialized.")
 
     completed_at = datetime.now()
-    model_stamp = format_model_stamp(completed_at)
-    model_dir = symbol_models_dir(SYMBOL) / model_stamp
+    model_dir_name = format_model_dir_name(
+        value=completed_at,
+        name=model_name,
+        failed_quality_gate=not quality_gate_passed,
+    )
+    model_dir = symbol_models_dir(SYMBOL) / model_dir_name
     model_dir.mkdir(parents=True, exist_ok=False)
     model_diagnostics_dir = model_dir / "diagnostics"
     model_test_dir = model_dir / "tests"
@@ -1643,15 +2072,7 @@ def main() -> None:
     export_model.eval()
     export_model.to("cpu")
     dummy = torch.randn(1, SEQ_LEN, feature_count)
-    torch.onnx.export(
-        export_model,
-        dummy,
-        str(archive_output_path),
-        input_names=["input"],
-        output_names=["output"],
-        opset_version=14,
-        dynamo=False,
-    )
+    export_onnx_model(export_model, dummy, archive_output_path)
     if not archive_only:
         shutil.copy2(archive_output_path, active_output_path)
     primary_output_path = archive_output_path if archive_only else active_output_path
@@ -1670,7 +2091,7 @@ def main() -> None:
             use_multihead_attention=use_multihead_attention,
             feature_columns=feature_columns,
             feature_profile=feature_profile,
-            use_extended_features=bool(args.use_extended_features),
+            use_extended_features=use_extended_features,
         )
         + "\n"
     )

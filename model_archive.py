@@ -33,6 +33,7 @@ LIVE_COMPILE_LOG_PATH = SCRIPT_DIR / "live.compile.log"
 DEFAULT_METAEDITOR_PATH = DEFAULT_WINDOWS_METAEDITOR_PATH
 DEFAULT_MODEL_STAMP_FORMAT = "%d_%m_%Y-%H_%M__%S"
 MODEL_STAMP_PATTERN = re.compile(r"^\d{2}_\d{2}_\d{4}-\d{2}_\d{2}(?:__|_)\d{2}$")
+MODEL_STAMP_SUFFIX_PATTERN = re.compile(r"(?P<stamp>\d{2}_\d{2}_\d{4}-\d{2}_\d{2}(?:__|_)\d{2})(?:-fail)?$")
 MODEL_STAMP_FORMATS = (
     DEFAULT_MODEL_STAMP_FORMAT,
     "%d_%m_%Y-%H_%M_%S",
@@ -59,14 +60,47 @@ def format_model_stamp(value: datetime | None = None) -> str:
     return (value or datetime.now()).strftime(DEFAULT_MODEL_STAMP_FORMAT)
 
 
-def parse_model_stamp(value: str) -> datetime:
+def sanitize_model_name(name: str) -> str:
+    cleaned = SAFE_SYMBOL_PATTERN.sub("_", name.strip())
+    return cleaned.strip("._-")
+
+
+def format_model_dir_name(
+    *,
+    value: datetime | None = None,
+    name: str = "",
+    failed_quality_gate: bool = False,
+) -> str:
+    stamp = format_model_stamp(value)
+    prefix = sanitize_model_name(name)
+    folder_name = f"{prefix}-{stamp}" if prefix else stamp
+    if failed_quality_gate:
+        folder_name += "-fail"
+    return folder_name
+
+
+def _try_parse_model_stamp_text(value: str) -> datetime | None:
     for stamp_format in MODEL_STAMP_FORMATS:
         try:
             return datetime.strptime(value, stamp_format)
         except ValueError:
             continue
+    return None
+
+
+def parse_model_stamp(value: str) -> datetime:
+    parsed = _try_parse_model_stamp_text(value)
+    if parsed is not None:
+        return parsed
+
+    match = MODEL_STAMP_SUFFIX_PATTERN.search(value)
+    if match:
+        parsed = _try_parse_model_stamp_text(match.group("stamp"))
+        if parsed is not None:
+            return parsed
+
     raise ValueError(
-        "Model date must match the model folder name, for example 03_04_2026-06_45__00."
+        "Model date must match the model folder name, for example 03_04_2026-06_45__00 or my_name-03_04_2026-06_45__00-fail."
     )
 
 
