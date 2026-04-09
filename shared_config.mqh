@@ -34,15 +34,15 @@
 
 // Fixed stop/target distance in symbol points, used when the trainer runs with -r
 // and when live.mq5 input R is true.
-#define DEFAULT_FIXED_MOVE 144
+#define DEFAULT_FIXED_MOVE 1440
 
 // Training labels: ATR multipliers used in the default ATR-risk mode.
-#define LABEL_SL_MULTIPLIER 5.4
-#define LABEL_TP_MULTIPLIER 5.4
+#define LABEL_SL_MULTIPLIER 0.54
+#define LABEL_TP_MULTIPLIER 0.54
 
 // Live execution defaults used when live.mq5 input R is false / ATR-risk mode is enabled.
-#define DEFAULT_SL_MULTIPLIER 5.4
-#define DEFAULT_TP_MULTIPLIER 5.4
+#define DEFAULT_SL_MULTIPLIER 0.54
+#define DEFAULT_TP_MULTIPLIER 0.54
 #define DEFAULT_LOT_SIZE 0.54
 #define DEFAULT_RISK_PERCENT 0.00
 #define DEFAULT_LOT_MIN 0.54
@@ -52,6 +52,6 @@
 
 #define DEFAULT_EPOCHS 144
 #define DEFAULT_BATCH_SIZE 54
-#define DEFAULT_MAX_TRAIN_WINDOWS 14400
-#define DEFAULT_MAX_EVAL_WINDOWS 1440
-#define DEFAULT_PATIENCE 144
+#define DEFAULT_MAX_TRAIN_WINDOWS 54000
+#define DEFAULT_MAX_EVAL_WINDOWS 5400
+#define DEFAULT_PATIENCE 3
