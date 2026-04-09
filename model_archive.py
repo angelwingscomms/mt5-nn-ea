@@ -503,7 +503,7 @@ def _compile_via_metaeditor_ui_wine(runtime: Mt5RuntimePaths) -> None:
         except Exception:
             pass
         try:
-            win.set_input_focus(X.RevertToParent, X.CurrentTime)
+            win.configure(stack_mode=X.Above)
         except Exception:
             pass
         dpy.sync()
@@ -521,25 +521,16 @@ def _compile_via_metaeditor_ui_wine(runtime: Mt5RuntimePaths) -> None:
 
     def find_metaeditor_window(dpy):
         root = dpy.screen().root
-        stack = [root]
-        seen: set[int] = set()
-        while stack:
-            win = stack.pop()
-            win_id = getattr(win, "id", None)
-            if win_id in seen:
-                continue
-            if win_id is not None:
-                seen.add(win_id)
+        for win in root.query_tree().children:
             try:
                 wm_class = win.get_wm_class() or ()
-            except Exception:
-                wm_class = ()
-            if any("metaeditor" in str(item).lower() for item in wm_class):
-                return win
-            try:
-                stack.extend(win.query_tree().children)
+                wm_name = win.get_wm_name() or ""
             except Exception:
                 continue
+            if any("metaeditor" in str(item).lower() for item in wm_class):
+                return win
+            if "metaeditor" in str(wm_name).lower() or "live.mq5" in str(wm_name).lower():
+                return win
         return None
 
     subprocess.run(

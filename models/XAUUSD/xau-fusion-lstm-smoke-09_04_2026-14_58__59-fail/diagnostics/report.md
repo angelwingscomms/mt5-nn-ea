@@ -54,39 +54,39 @@
   - BUY: 368274
   - SELL: 356243
 - train windows:
-  - HOLD: 7049
-  - BUY: 3755
-  - SELL: 3596
+  - HOLD: 141
+  - BUY: 53
+  - SELL: 62
 - validation windows:
-  - HOLD: 610
-  - BUY: 424
-  - SELL: 406
+  - HOLD: 29
+  - BUY: 19
+  - SELL: 16
 - holdout windows:
-  - HOLD: 757
-  - BUY: 350
-  - SELL: 333
+  - HOLD: 38
+  - BUY: 15
+  - SELL: 11
 
 ## Window Usage
 - train_available: 997612
-- train_used: 14400
+- train_used: 256
 - validation_available: 213658
-- validation_used: 1440
+- validation_used: 64
 - holdout_available: 213659
-- holdout_used: 1440
+- holdout_used: 64
 
 ## Validation
 - selected_trades: 0
 - trade_coverage: 0.0000
 - selected_trade_precision: n/a
 - selected_trade_mean_confidence: n/a
-- mean_confidence_all_predictions: 0.3755
+- mean_confidence_all_predictions: 0.3512
 
 ## Holdout
 - selected_trades: 0
 - trade_coverage: 0.0000
 - selected_trade_precision: n/a
 - selected_trade_mean_confidence: n/a
-- mean_confidence_all_predictions: 0.3752
+- mean_confidence_all_predictions: 0.3508
 
 ## Files
 - bars.csv

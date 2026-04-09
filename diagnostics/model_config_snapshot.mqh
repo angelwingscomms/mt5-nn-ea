@@ -2,15 +2,18 @@
 // Shared static values live in shared_config.mqh.
 #define MODEL_USE_ATR_RISK 0
 #define MODEL_USE_FIXED_TIME_BARS 0
-#define MODEL_ARCHITECTURE "bilstm"
+#define MODEL_ARCHITECTURE "fusion_lstm"
 #define MODEL_FEATURE_PROFILE "sequence_extended"
 #define MODEL_USE_EXTENDED_FEATURES 1
 #define MODEL_USE_MINIROCKET 0
 #define MODEL_USE_CASTOR 0
 #define MODEL_USE_ELA 0
-#define MODEL_USE_BILSTM 1
+#define MODEL_USE_FUSION_LSTM 1
+#define MODEL_USE_BILSTM 0
 #define MODEL_USE_GRU 0
 #define MODEL_USE_TCN 0
+#define MODEL_USE_TLA 0
+#define MODEL_USE_LEGACY_LSTM_ATTENTION 0
 #define MODEL_USE_CHRONOS 0
 #define MODEL_USE_CHRONOS_BOLT 0
 #define MODEL_USE_MULTIHEAD_ATTENTION 1

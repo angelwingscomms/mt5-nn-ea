@@ -55,7 +55,13 @@ from model_archive import (
     sync_directory_contents,
 )
 from mt5_runtime import resolve_mt5_runtime
-from sequence_models import LegacyLSTMAttentionClassifier, RecurrentSequenceClassifier, TCNClassifier
+from sequence_models import (
+    FusionLSTMClassifier,
+    LegacyLSTMAttentionClassifier,
+    RecurrentSequenceClassifier,
+    TCNClassifier,
+    TemporalLSTMAttentionClassifier,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,7 +71,7 @@ logging.basicConfig(
 log = logging.getLogger("nn")
 
 EPS = 1e-10
-DEFAULT_DATA_FILE = "market_ticks.csv"
+DEFAULT_DATA_FILE = "gold.csv"
 DEFAULT_OUTPUT_FILE = ACTIVE_ONNX_PATH.name
 SHARED_CONFIG_PATH = ACTIVE_SHARED_CONFIG_PATH
 DEFAULT_MINIROCKET_FEATURES = 10_080
@@ -360,7 +366,8 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
         action="store_true",
         help=(
             "Enable 27 extra architecture-aware market features. MiniRocket gets a shape/microstructure-heavy "
-            "pack; the sequence encoders (Mamba, Castor, ELA, BiLSTM, GRU, TCN) get an indicator/regime-heavy pack."
+            "pack; the sequence encoders (Mamba, Castor, ELA, Fusion-LSTM, BiLSTM, GRU, TCN) get an "
+            "indicator/regime-heavy pack."
         ),
     )
     architecture_group = parser.add_mutually_exclusive_group()
@@ -380,6 +387,16 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
         "--ela",
         action="store_true",
         help="Use the ELA encoder: an LSTM backbone with the repo's multihead attention head.",
+    )
+    architecture_group.add_argument(
+        "-fl",
+        "--fusion-lstm",
+        "--use-fusion-lstm-encoder",
+        dest="use_fusion_lstm_encoder",
+        action="store_true",
+        help=(
+            "Use a Mish-LSTM encoder with a built-in residual self-attention pooling block and Dense(20) classifier."
+        ),
     )
     architecture_group.add_argument(
         "--bilstm",
@@ -411,6 +428,13 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
             "Use the older single-layer LSTM + self-attention + mean-pool + dense-20 classifier pattern. "
             "It uses the current pipeline's active feature pack, so with -f on sequence models it will see 36 features on XAUUSD."
         ),
+    )
+    architecture_group.add_argument(
+        "-tla",
+        "--use-tla-encoder",
+        dest="use_tla_encoder",
+        action="store_true",
+        help="Use temporal convolutions + bidirectional LSTM + multihead attention encoder.",
     )
     architecture_group.add_argument(
         "--chronos-bolt",
@@ -599,12 +623,16 @@ def resolve_architecture(args: argparse.Namespace) -> str:
         return "legacy_lstm_attention"
     if args.ela:
         return "ela"
+    if args.use_fusion_lstm_encoder:
+        return "fusion_lstm"
     if args.use_bilstm_encoder:
         return "bilstm"
     if args.use_gru_encoder:
         return "gru"
     if args.use_tcn_encoder:
         return "tcn"
+    if args.use_tla_encoder:
+        return "tla"
     if args.use_minirocket_encoder:
         return "minirocket"
     if args.use_castor_encoder:
@@ -1581,9 +1609,11 @@ def build_mql_config(
             f"#define MODEL_USE_MINIROCKET {1 if architecture == 'minirocket' else 0}",
             f"#define MODEL_USE_CASTOR {1 if architecture == 'castor' else 0}",
             f"#define MODEL_USE_ELA {1 if architecture == 'ela' else 0}",
+            f"#define MODEL_USE_FUSION_LSTM {1 if architecture == 'fusion_lstm' else 0}",
             f"#define MODEL_USE_BILSTM {1 if architecture == 'bilstm' else 0}",
             f"#define MODEL_USE_GRU {1 if architecture == 'gru' else 0}",
             f"#define MODEL_USE_TCN {1 if architecture == 'tcn' else 0}",
+            f"#define MODEL_USE_TLA {1 if architecture == 'tla' else 0}",
             f"#define MODEL_USE_LEGACY_LSTM_ATTENTION {1 if architecture == 'legacy_lstm_attention' else 0}",
             f"#define MODEL_USE_CHRONOS {1 if architecture == 'chronos_bolt' else 0}",
             f"#define MODEL_USE_CHRONOS_BOLT {1 if architecture == 'chronos_bolt' else 0}",
@@ -1635,10 +1665,51 @@ def main() -> None:
         else:
             log.info("Legacy LSTM attention architecture includes self-attention by design.")
         use_multihead_attention = True
+        if args.sequence_hidden_size != DEFAULT_SEQUENCE_HIDDEN_SIZE:
+            log.warning(
+                "Legacy LSTM attention fixes its recurrent width to the active feature count; ignoring --sequence-hidden-size=%d.",
+                args.sequence_hidden_size,
+            )
+        if args.sequence_layers != DEFAULT_SEQUENCE_LAYERS:
+            log.warning(
+                "Legacy LSTM attention uses a single recurrent layer; ignoring --sequence-layers=%d.",
+                args.sequence_layers,
+            )
+        if abs(args.sequence_dropout - DEFAULT_SEQUENCE_DROPOUT) > 1e-12:
+            log.warning(
+                "Legacy LSTM attention does not use the recurrent dropout path; ignoring --sequence-dropout=%.3f.",
+                args.sequence_dropout,
+            )
+        if args.attention_layers != DEFAULT_ATTENTION_LAYERS:
+            log.warning(
+                "Legacy LSTM attention uses a single self-attention block; ignoring --attention-layers=%d.",
+                args.attention_layers,
+            )
     if architecture == "ela":
         if not use_multihead_attention:
             log.info("ELA uses the multihead attention head by design; enabling attention automatically.")
         use_multihead_attention = True
+    if architecture == "fusion_lstm":
+        if not use_multihead_attention:
+            log.info("Fusion-LSTM includes its residual self-attention block by design; enabling attention automatically.")
+        use_multihead_attention = True
+        if args.sequence_hidden_size != DEFAULT_SEQUENCE_HIDDEN_SIZE:
+            log.warning(
+                "Fusion-LSTM fixes its recurrent width to the active feature count; ignoring --sequence-hidden-size=%d.",
+                args.sequence_hidden_size,
+            )
+        if args.sequence_layers != DEFAULT_SEQUENCE_LAYERS:
+            log.warning("Fusion-LSTM uses a single Mish-LSTM layer; ignoring --sequence-layers=%d.", args.sequence_layers)
+        if abs(args.sequence_dropout - DEFAULT_SEQUENCE_DROPOUT) > 1e-12:
+            log.warning(
+                "Fusion-LSTM does not use the recurrent dropout path; ignoring --sequence-dropout=%.3f.",
+                args.sequence_dropout,
+            )
+        if args.attention_layers != DEFAULT_ATTENTION_LAYERS:
+            log.warning(
+                "Fusion-LSTM uses a single self-attention block; ignoring --attention-layers=%d.",
+                args.attention_layers,
+            )
     if architecture == "chronos_bolt" and use_multihead_attention:
         log.warning("Chronos-Bolt backend ignores --use-multihead-attention.")
         use_multihead_attention = False
@@ -1973,12 +2044,19 @@ def main() -> None:
                 shuffle=False,
             )
         else:
-            if architecture in {"ela", "bilstm", "gru", "tcn", "legacy_lstm_attention"}:
+            if architecture in {"ela", "fusion_lstm", "bilstm", "gru", "tcn", "tla", "legacy_lstm_attention"}:
                 learning_rate = args.lr if args.lr > 0.0 else DEFAULT_SEQUENCE_LR
                 weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_SEQUENCE_WEIGHT_DECAY
                 if architecture == "legacy_lstm_attention":
                     training_model = LegacyLSTMAttentionClassifier(
                         n_features=feature_count,
+                        attention_heads=args.attention_heads,
+                        attention_dropout=args.attention_dropout,
+                    ).to(device)
+                elif architecture == "fusion_lstm":
+                    training_model = FusionLSTMClassifier(
+                        n_features=feature_count,
+                        hidden=20,
                         attention_heads=args.attention_heads,
                         attention_dropout=args.attention_dropout,
                     ).to(device)
@@ -1991,6 +2069,19 @@ def main() -> None:
                         n_layers=args.tcn_levels,
                         kernel_size=args.tcn_kernel_size,
                         use_multihead_attention=use_multihead_attention,
+                        attention_heads=args.attention_heads,
+                        attention_layers=args.attention_layers,
+                        attention_dropout=args.attention_dropout,
+                    ).to(device)
+                elif architecture == "tla":
+                    training_model = TemporalLSTMAttentionClassifier(
+                        n_features=feature_count,
+                        conv_channels=128,
+                        lstm_hidden=args.sequence_hidden_size,
+                        hidden=max(args.sequence_hidden_size, feature_count * 4),
+                        dropout=args.sequence_dropout,
+                        conv_kernel_size=5,
+                        lstm_layers=args.sequence_layers,
                         attention_heads=args.attention_heads,
                         attention_layers=args.attention_layers,
                         attention_dropout=args.attention_dropout,

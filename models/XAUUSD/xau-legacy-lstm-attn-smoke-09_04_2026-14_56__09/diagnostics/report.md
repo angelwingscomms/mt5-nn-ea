@@ -2,7 +2,7 @@
 
 ## Run
 - symbol: XAUUSD
-- backend: fusion-lstm-attention
+- backend: legacy-lstm-attention
 - feature_profile: sequence_extended
 - feature_count: 36
 - loss_mode: focal
@@ -28,10 +28,10 @@
 - execution_sl_multiplier: 5.40
 - execution_tp_multiplier: 5.40
 - use_all_windows: 0
-- selected_primary_confidence: 0.4000
-- deployed_primary_confidence: 0.4000
-- quality_gate_passed: 0
-- quality_gate_reason: validation selected trades 0 < required 12; validation selected-trade precision unavailable
+- selected_primary_confidence: 0.4300
+- deployed_primary_confidence: 0.4300
+- quality_gate_passed: 1
+- quality_gate_reason: -
 
 ## Bar Stats
 - bars: 1425304
@@ -54,39 +54,39 @@
   - BUY: 368274
   - SELL: 356243
 - train windows:
-  - HOLD: 7049
-  - BUY: 3755
-  - SELL: 3596
+  - HOLD: 141
+  - BUY: 53
+  - SELL: 62
 - validation windows:
-  - HOLD: 610
-  - BUY: 424
-  - SELL: 406
+  - HOLD: 29
+  - BUY: 19
+  - SELL: 16
 - holdout windows:
-  - HOLD: 757
-  - BUY: 350
-  - SELL: 333
+  - HOLD: 38
+  - BUY: 15
+  - SELL: 11
 
 ## Window Usage
 - train_available: 997612
-- train_used: 14400
+- train_used: 256
 - validation_available: 213658
-- validation_used: 1440
+- validation_used: 64
 - holdout_available: 213659
-- holdout_used: 1440
+- holdout_used: 64
 
 ## Validation
-- selected_trades: 0
-- trade_coverage: 0.0000
-- selected_trade_precision: n/a
-- selected_trade_mean_confidence: n/a
-- mean_confidence_all_predictions: 0.3755
+- selected_trades: 12
+- trade_coverage: 0.1875
+- selected_trade_precision: 0.5000
+- selected_trade_mean_confidence: 0.4390
+- mean_confidence_all_predictions: 0.4114
 
 ## Holdout
-- selected_trades: 0
-- trade_coverage: 0.0000
-- selected_trade_precision: n/a
-- selected_trade_mean_confidence: n/a
-- mean_confidence_all_predictions: 0.3752
+- selected_trades: 18
+- trade_coverage: 0.2812
+- selected_trade_precision: 0.2222
+- selected_trade_mean_confidence: 0.4437
+- mean_confidence_all_predictions: 0.4159
 
 ## Files
 - bars.csv
