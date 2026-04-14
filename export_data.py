@@ -1,5 +1,8 @@
 """
-Compile and execute data.mq5 via MT5, then move output to ./data/SYMBOL/ticks.csv.
+Compile and execute a data export script via MT5, then move output to ./data/SYMBOL/ticks.csv.
+Profiles:
+- default: data.mq5 (time_msc,bid,ask)
+- gold: data_gold.mq5 (time_msc,bid,ask,usdx_bid,usdjpy_bid)
 """
 from __future__ import annotations
 
@@ -26,18 +29,27 @@ OUTPUT_DIR = SCRIPT_DIR / "data"
 DEFAULT_OUTPUT_FILE = "market_ticks.csv"
 COMPILE_LOG_PATH = SCRIPT_DIR / "data.compile.log"
 STARTUP_CONFIG_DIR = Path(tempfile.gettempdir()) / "mt5_export_configs"
+DATA_PROFILE_SCRIPTS = {
+    "default": SCRIPT_DIR / "data.mq5",
+    "gold": SCRIPT_DIR / "data_gold.mq5",
+}
 
 
 def runtime_script_dir(runtime) -> Path:
     return runtime.instance_root / "MQL5" / "Scripts" / PROJECT_DIR_NAME
 
 
-def deploy_script_files(runtime, shared_config_path: Path) -> tuple[Path, Path]:
+def profile_script_name(profile: str) -> str:
+    return "data_gold" if profile == "gold" else "data"
+
+
+def deploy_script_files(runtime, shared_config_path: Path, profile: str) -> tuple[Path, Path]:
     script_dir = runtime_script_dir(runtime)
     script_dir.mkdir(parents=True, exist_ok=True)
-    deployed_source = script_dir / "data.mq5"
+    deployed_source = script_dir / f"{profile_script_name(profile)}.mq5"
     deployed_shared_config = script_dir / "shared_config.mqh"
-    shutil.copy2(SCRIPT_DIR / "data.mq5", deployed_source)
+    source_path = DATA_PROFILE_SCRIPTS.get(profile, SCRIPT_DIR / "data.mq5")
+    shutil.copy2(source_path, deployed_source)
     shutil.copy2(shared_config_path, deployed_shared_config)
     return deployed_source, deployed_shared_config
 
@@ -64,6 +76,13 @@ def resolve_symbol_config(requested_symbol: str) -> tuple[str, Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export MT5 tick data into ./data/<SYMBOL>/ticks.csv.")
     parser.add_argument("--symbol", type=str, default="", help="Optional symbol config to load from models/<SYMBOL>/config.")
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default="default",
+        choices=sorted(DATA_PROFILE_SCRIPTS.keys()),
+        help="Select the data export script profile (default or gold).",
+    )
     parser.add_argument("--instance-root", type=str, default="", help="Optional explicit MT5 data root.")
     parser.add_argument("--terminal-path", type=str, default="", help="Optional explicit terminal64.exe path.")
     parser.add_argument("--metaeditor-path", type=str, default="", help="Optional explicit MetaEditor path.")
@@ -82,8 +101,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def compile_data_script(runtime, shared_config_path: Path) -> Path:
-    source_path, deployed_shared_config = deploy_script_files(runtime, shared_config_path)
+def compile_data_script(runtime, shared_config_path: Path, profile: str) -> Path:
+    source_path, deployed_shared_config = deploy_script_files(runtime, shared_config_path, profile=profile)
     target_path = source_path.with_suffix(".ex5")
     COMPILE_LOG_PATH.unlink(missing_ok=True)
 
@@ -119,14 +138,15 @@ def compile_data_script(runtime, shared_config_path: Path) -> Path:
     return target_path
 
 
-def write_startup_config(symbol: str) -> Path:
+def write_startup_config(symbol: str, profile: str) -> Path:
     STARTUP_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    startup_config_path = STARTUP_CONFIG_DIR / f"{symbol.lower()}_data_export.ini"
+    script_name = profile_script_name(profile)
+    startup_config_path = STARTUP_CONFIG_DIR / f"{symbol.lower()}_{script_name}_export.ini"
     startup_config_path.write_text(
         "\n".join(
             [
                 "[StartUp]",
-                f"Script={PROJECT_DIR_NAME}\\data",
+                f"Script={PROJECT_DIR_NAME}\\{script_name}",
                 f"Symbol={symbol}",
                 "Period=M1",
                 "ShutdownTerminal=1",
@@ -138,14 +158,14 @@ def write_startup_config(symbol: str) -> Path:
     return startup_config_path
 
 
-def run_script(runtime, symbol: str) -> None:
+def run_script(runtime, symbol: str, profile: str) -> None:
     if not runtime.terminal_path.exists():
         raise FileNotFoundError(f"MT5 terminal not found: {runtime.terminal_path}")
 
     stop_terminal_best_effort(runtime)
-    config_path = write_startup_config(symbol)
+    config_path = write_startup_config(symbol, profile=profile)
     command = build_terminal_command(runtime, config_path)
-    print(f"[INFO] Launching MT5 with data.mq5 for {symbol}...")
+    print(f"[INFO] Launching MT5 with {profile_script_name(profile)}.mq5 for {symbol}...")
     print(f"[INFO] Command: {' '.join(command)}")
     process = subprocess.Popen(
         command,
@@ -215,14 +235,14 @@ def main() -> bool:
             shutil.copy2(config_path, ACTIVE_SHARED_CONFIG_PATH)
 
         print("[STEP 3] Compiling data.mq5...")
-        compiled_path = compile_data_script(runtime, config_path)
+        compiled_path = compile_data_script(runtime, config_path, profile=args.profile)
         print(f"[STEP 3] SUCCESS - Compiled: {compiled_path}")
         print()
 
-        print("[STEP 4] Launching MT5 terminal with data.mq5...")
+        print(f"[STEP 4] Launching MT5 terminal with {profile_script_name(args.profile)}.mq5...")
         stale_output = runtime.files_dir / args.output_file
         stale_output.unlink(missing_ok=True)
-        run_script(runtime, symbol)
+        run_script(runtime, symbol, profile=args.profile)
         print("[STEP 4] SUCCESS")
         print()
 

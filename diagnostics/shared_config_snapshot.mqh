@@ -1,7 +1,7 @@
 // Single source of truth for values shared by nn.py, live.mq5, data.mq5, and test.py.
 #define SYMBOL "XAUUSD"
 
-#define SEQ_LEN 54
+#define SEQ_LEN 120
 #define TARGET_HORIZON 27
 
 // Default feature layout. The active model snapshot may override MODEL_FEATURE_COUNT
@@ -31,6 +31,8 @@
 
 // Fixed-time bars are optional and only used when nn.py runs with -i.
 #define PRIMARY_BAR_SECONDS 9
+// Fixed-tick bars are optional and only used when nn.py runs with --use-fixed-tick-bars or -gold.
+#define PRIMARY_TICK_DENSITY 27
 
 // Fixed stop/target distance in symbol points, used when the trainer runs with -r
 // and when live.mq5 input R is true.
@@ -48,10 +50,10 @@
 #define DEFAULT_LOT_MIN 0.54
 
 // Trainer window usage: 1 = use every eligible window in each split, 0 = obey the max_* caps below.
-#define USE_ALL_WINDOWS 0
+#define USE_ALL_WINDOWS 1
 
 #define DEFAULT_EPOCHS 54
-#define DEFAULT_BATCH_SIZE 54
+#define DEFAULT_BATCH_SIZE 64
 #define DEFAULT_MAX_TRAIN_WINDOWS 5400
 #define DEFAULT_MAX_EVAL_WINDOWS 540
 #define DEFAULT_PATIENCE 9

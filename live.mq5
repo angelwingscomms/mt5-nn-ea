@@ -1,10 +1,10 @@
 #include <Trade\Trade.mqh>
 // @active-model-reference begin
 #define ACTIVE_MODEL_SYMBOL "XAUUSD"
-#define ACTIVE_MODEL_VERSION "10_04_2026-19_27__30-fail"
-#include "models/XAUUSD/10_04_2026-19_27__30-fail/diagnostics/shared_config_snapshot.mqh"
-#include "models/XAUUSD/10_04_2026-19_27__30-fail/diagnostics/model_config_snapshot.mqh"
-#resource "models/XAUUSD/10_04_2026-19_27__30-fail\model.onnx" as uchar model_buffer[]
+#define ACTIVE_MODEL_VERSION "10_04_2026-13_56__01"
+#include "models/XAUUSD/10_04_2026-13_56__01/diagnostics/shared_config_snapshot.mqh"
+#include "models/XAUUSD/10_04_2026-13_56__01/diagnostics/model_config_snapshot.mqh"
+#resource "models/XAUUSD/10_04_2026-13_56__01\model.onnx" as uchar model_buffer[]
 // @active-model-reference end
 
 #ifndef MODEL_USE_ATR_RISK
@@ -13,6 +13,10 @@
 
 #ifndef MODEL_USE_FIXED_TIME_BARS
 #define MODEL_USE_FIXED_TIME_BARS 0
+#endif
+
+#ifndef MODEL_USE_FIXED_TICK_BARS
+#define MODEL_USE_FIXED_TICK_BARS 0
 #endif
 
 #define INPUT_BUFFER_SIZE (SEQ_LEN * MODEL_FEATURE_COUNT)
@@ -28,6 +32,8 @@ input double RISK_PERCENT = DEFAULT_RISK_PERCENT;
 input double LOT_MIN = DEFAULT_LOT_MIN;
 input int MAGIC_NUMBER = 777777;
 input bool DEBUG_LOG = true;
+input string USDX_SYMBOL = "$USDX";
+input string USDJPY_SYMBOL = "USDJPY";
 
 long onnx_handle = INVALID_HANDLE;
 CTrade trade;
@@ -39,6 +45,9 @@ struct Bar {
    double c;
    double spread;
    double tick_imbalance;
+   int tick_count;
+   double usdx_bid;
+   double usdjpy_bid;
    double atr_feature;
    double atr_trade;
    ulong time_msc;
@@ -54,6 +63,10 @@ ulong last_tick_time = 0;
 double tick_imbalance_sum = 0.0;
 double last_bid = 0.0;
 int last_sign = 1;
+bool usdx_available = false;
+bool usdjpy_available = false;
+double last_usdx_bid = 0.0;
+double last_usdjpy_bid = 0.0;
 double primary_expected_abs_theta = 60.0;
 int warmup_count = 0;
 double warmup_sum_feature = 0.0;
@@ -90,6 +103,19 @@ double SafeLogRatio(double num, double den);
 double LogReturnAt(int h);
 double ReturnOverBars(int h, int bars);
 double RollingStdReturn(int h, int window);
+double MeanClose(int h, int window);
+double StdClose(int h, int window);
+double MaxHigh(int h, int window);
+double MinLow(int h, int window);
+double MeanTickCount(int h, int window);
+double StdTickCount(int h, int window);
+double MeanTickImbalance(int h, int window);
+double MeanSpreadRel(int h, int window);
+double StdSpreadRel(int h, int window);
+double MeanAtrFeature(int h, int window);
+double SimpleRsi(int h, int period);
+double StochK(int h, int period);
+double StochD(int h, int period);
 void ExtractFeatures(int h, float &features[]);
 void Softmax(const float &logits[], float &probs[]);
 void Predict();
@@ -101,6 +127,7 @@ double TargetDistance();
 double NormalizeVolume(double volume);
 double CalculateTradeVolume(int signal, double price, double sl);
 void PrintRunSummary();
+double ResolveAuxBid(string symbol, bool &available, double &last_value, double fallback);
 
 int OnInit() {
    DebugPrint("Model reference: " + ACTIVE_MODEL_SYMBOL + "/" + ACTIVE_MODEL_VERSION);
@@ -132,16 +159,21 @@ int OnInit() {
    ArrayInitialize(input_data, 0.0f);
    trade.SetExpertMagicNumber(MAGIC_NUMBER);
    primary_expected_abs_theta = MathMax(2.0, (double)MathMax(2, IMBALANCE_MIN_TICKS / 3));
+   if(MODEL_USE_FIXED_TICK_BARS != 0 && PRIMARY_TICK_DENSITY <= 0) {
+      Print("[FATAL] PRIMARY_TICK_DENSITY must be positive for fixed-tick bars.");
+      return INIT_FAILED;
+   }
    DebugPrint(
       StringFormat(
-         "init seq=%d horizon=%d history=%d bar_mode=%s imbalance_min_ticks=%d imbalance_span=%d bar_seconds=%d risk_mode=%s fixed_move=%.2f sl=%.2f tp=%.2f lot=%.2f risk_pct=%.3f primary_conf=%.2f",
+         "init seq=%d horizon=%d history=%d bar_mode=%s imbalance_min_ticks=%d imbalance_span=%d bar_seconds=%d tick_density=%d risk_mode=%s fixed_move=%.2f sl=%.2f tp=%.2f lot=%.2f risk_pct=%.3f primary_conf=%.2f",
          SEQ_LEN,
          TARGET_HORIZON,
          REQUIRED_HISTORY_INDEX,
-         (MODEL_USE_FIXED_TIME_BARS != 0 ? "FIXED_TIME" : "IMBALANCE"),
+         (MODEL_USE_FIXED_TICK_BARS != 0 ? "FIXED_TICK" : (MODEL_USE_FIXED_TIME_BARS != 0 ? "FIXED_TIME" : "IMBALANCE")),
          IMBALANCE_MIN_TICKS,
          IMBALANCE_EMA_SPAN,
          PRIMARY_BAR_SECONDS,
+         PRIMARY_TICK_DENSITY,
          (R ? "FIXED" : "ATR"),
          FIXED_MOVE,
          SL_MULTIPLIER,
@@ -161,6 +193,8 @@ int OnInit() {
    } else {
       last_tick_time = TimeCurrent() * 1000ULL;
    }
+   usdx_available = SymbolSelect(USDX_SYMBOL, true);
+   usdjpy_available = SymbolSelect(USDJPY_SYMBOL, true);
 
    LoadHistory();
    return INIT_SUCCEEDED;
@@ -236,6 +270,9 @@ void StartBar(MqlTick &tick, ulong bar_bucket) {
    current_bar.c = tick.bid;
    current_bar.spread = tick.ask - tick.bid;
    current_bar.tick_imbalance = 0.0;
+   current_bar.tick_count = 0;
+   current_bar.usdx_bid = 0.0;
+   current_bar.usdjpy_bid = 0.0;
    current_bar.atr_feature = 0.0;
    current_bar.atr_trade = 0.0;
    current_bar.time_msc = BarOpenTime(bar_bucket);
@@ -253,6 +290,9 @@ void StartImbalanceBar(MqlTick &tick) {
    current_bar.c = tick.bid;
    current_bar.spread = tick.ask - tick.bid;
    current_bar.tick_imbalance = 0.0;
+   current_bar.tick_count = 0;
+   current_bar.usdx_bid = 0.0;
+   current_bar.usdjpy_bid = 0.0;
    current_bar.atr_feature = 0.0;
    current_bar.atr_trade = 0.0;
    current_bar.time_msc = tick.time_msc;
@@ -411,8 +451,23 @@ void ProcessTick(MqlTick &tick, ulong bar_bucket) {
    current_bar.l = MathMin(current_bar.l, tick.bid);
    current_bar.c = tick.bid;
    current_bar.spread = tick.ask - tick.bid;
+   current_bar.usdx_bid = ResolveAuxBid(USDX_SYMBOL, usdx_available, last_usdx_bid, tick.bid);
+   current_bar.usdjpy_bid = ResolveAuxBid(USDJPY_SYMBOL, usdjpy_available, last_usdjpy_bid, tick.bid);
    ticks_in_bar++;
    tick_imbalance_sum += tick_sign;
+}
+
+double ResolveAuxBid(string symbol, bool &available, double &last_value, double fallback) {
+   if(!available) {
+      return (last_value > 0.0 ? last_value : fallback);
+   }
+   MqlTick aux;
+   if(SymbolInfoTick(symbol, aux) && aux.bid > 0.0) {
+      last_value = aux.bid;
+      return aux.bid;
+   }
+   available = false;
+   return (last_value > 0.0 ? last_value : fallback);
 }
 
 void UpdateIndicators(Bar &bar) {
@@ -464,6 +519,7 @@ void UpdatePrimaryImbalanceThreshold(double observed_abs_theta) {
 
 void CloseBar() {
    current_bar.tick_imbalance = tick_imbalance_sum / MathMax(1, ticks_in_bar);
+   current_bar.tick_count = ticks_in_bar;
    UpdateIndicators(current_bar);
 
    for(int i = HISTORY_SIZE - 1; i > 0; i--) {
@@ -516,6 +572,37 @@ void OnTick() {
 
          ProcessTick(ticks[i], tick_bucket);
          last_tick_time = ticks[i].time_msc;
+         continue;
+      }
+
+      if(MODEL_USE_FIXED_TICK_BARS != 0) {
+         if(!bar_started) {
+            StartImbalanceBar(ticks[i]);
+         }
+         ProcessTick(ticks[i], 0);
+         last_tick_time = ticks[i].time_msc;
+         if(ticks_in_bar >= PRIMARY_TICK_DENSITY) {
+            int closed_tick_count = ticks_in_bar;
+            CloseBar();
+            DebugPrint(
+               StringFormat(
+                  "bar closed mode=FIXED_TICK ticks=%d atr_trade=%.5f close=%.5f",
+                  closed_tick_count,
+                  history[0].atr_trade,
+                  history[0].c
+               )
+            );
+            if(history[REQUIRED_HISTORY_INDEX].valid) {
+               Predict();
+            } else {
+               DebugPrint(
+                  StringFormat(
+                     "history not ready yet: need index %d valid before predicting",
+                     REQUIRED_HISTORY_INDEX
+                  )
+               );
+            }
+         }
          continue;
       }
 
@@ -578,6 +665,18 @@ void LoadHistory() {
          continue;
       }
 
+      if(MODEL_USE_FIXED_TICK_BARS != 0) {
+         if(!bar_started) {
+            StartImbalanceBar(ticks[i]);
+         }
+         ProcessTick(ticks[i], 0);
+         last_tick_time = ticks[i].time_msc;
+         if(ticks_in_bar >= PRIMARY_TICK_DENSITY) {
+            CloseBar();
+         }
+         continue;
+      }
+
       ProcessTick(ticks[i], 0);
       last_tick_time = ticks[i].time_msc;
 
@@ -624,6 +723,127 @@ double RollingStdReturn(int h, int window) {
    return MathSqrt(var / window);
 }
 
+double MeanClose(int h, int window) {
+   double sum = 0.0;
+   for(int i = 0; i < window; i++) {
+      sum += history[h + i].c;
+   }
+   return sum / window;
+}
+
+double StdClose(int h, int window) {
+   double mean = MeanClose(h, window);
+   double var = 0.0;
+   for(int i = 0; i < window; i++) {
+      double diff = history[h + i].c - mean;
+      var += diff * diff;
+   }
+   return MathSqrt(var / window);
+}
+
+double MaxHigh(int h, int window) {
+   double maxv = history[h].h;
+   for(int i = 1; i < window; i++) {
+      maxv = MathMax(maxv, history[h + i].h);
+   }
+   return maxv;
+}
+
+double MinLow(int h, int window) {
+   double minv = history[h].l;
+   for(int i = 1; i < window; i++) {
+      minv = MathMin(minv, history[h + i].l);
+   }
+   return minv;
+}
+
+double MeanTickCount(int h, int window) {
+   double sum = 0.0;
+   for(int i = 0; i < window; i++) {
+      sum += history[h + i].tick_count;
+   }
+   return sum / window;
+}
+
+double StdTickCount(int h, int window) {
+   double mean = MeanTickCount(h, window);
+   double var = 0.0;
+   for(int i = 0; i < window; i++) {
+      double diff = history[h + i].tick_count - mean;
+      var += diff * diff;
+   }
+   return MathSqrt(var / window);
+}
+
+double MeanTickImbalance(int h, int window) {
+   double sum = 0.0;
+   for(int i = 0; i < window; i++) {
+      sum += history[h + i].tick_imbalance;
+   }
+   return sum / window;
+}
+
+double MeanSpreadRel(int h, int window) {
+   double sum = 0.0;
+   for(int i = 0; i < window; i++) {
+      double close = history[h + i].c;
+      double spread_rel = history[h + i].spread / (close + 1e-10);
+      sum += spread_rel;
+   }
+   return sum / window;
+}
+
+double StdSpreadRel(int h, int window) {
+   double mean = MeanSpreadRel(h, window);
+   double var = 0.0;
+   for(int i = 0; i < window; i++) {
+      double close = history[h + i].c;
+      double spread_rel = history[h + i].spread / (close + 1e-10);
+      double diff = spread_rel - mean;
+      var += diff * diff;
+   }
+   return MathSqrt(var / window);
+}
+
+double MeanAtrFeature(int h, int window) {
+   double sum = 0.0;
+   for(int i = 0; i < window; i++) {
+      sum += history[h + i].atr_feature;
+   }
+   return sum / window;
+}
+
+double SimpleRsi(int h, int period) {
+   double gain = 0.0;
+   double loss = 0.0;
+   for(int i = 0; i < period; i++) {
+      double delta = history[h + i].c - history[h + i + 1].c;
+      if(delta > 0.0) {
+         gain += delta;
+      } else if(delta < 0.0) {
+         loss -= delta;
+      }
+   }
+   double avg_gain = gain / period;
+   double avg_loss = loss / period;
+   double rs = avg_gain / (avg_loss + 1e-10);
+   return (100.0 - (100.0 / (1.0 + rs)) - 50.0) / 50.0;
+}
+
+double StochK(int h, int period) {
+   double high = MaxHigh(h, period);
+   double low = MinLow(h, period);
+   return (history[h].c - low) / (high - low + 1e-10);
+}
+
+double StochD(int h, int period) {
+   double sum = 0.0;
+   for(int i = 0; i < period; i++) {
+      sum += StochK(h + i, 9);
+   }
+   return sum / period;
+}
+
 void ExtractFeatures(int h, float &features[]) {
    Bar bar = history[h];
    Bar prev = history[h + 1];
@@ -641,6 +861,167 @@ void ExtractFeatures(int h, float &features[]) {
    features[FEATURE_IDX_RV] = ScaleAndClip((float)RollingStdReturn(h, RV_PERIOD), FEATURE_IDX_RV);
    features[FEATURE_IDX_RETURN_N] = ScaleAndClip((float)ReturnOverBars(h, RETURN_PERIOD), FEATURE_IDX_RETURN_N);
    features[FEATURE_IDX_TICK_IMBALANCE] = ScaleAndClip((float)bar.tick_imbalance, FEATURE_IDX_TICK_IMBALANCE);
+#ifdef FEATURE_IDX_RET_2
+   features[FEATURE_IDX_RET_2] = ScaleAndClip((float)ReturnOverBars(h, 2), FEATURE_IDX_RET_2);
+#endif
+#ifdef FEATURE_IDX_RET_6
+   features[FEATURE_IDX_RET_6] = ScaleAndClip((float)ReturnOverBars(h, 6), FEATURE_IDX_RET_6);
+#endif
+#ifdef FEATURE_IDX_RET_12
+   features[FEATURE_IDX_RET_12] = ScaleAndClip((float)ReturnOverBars(h, 12), FEATURE_IDX_RET_12);
+#endif
+#ifdef FEATURE_IDX_RET_20
+   features[FEATURE_IDX_RET_20] = ScaleAndClip((float)ReturnOverBars(h, 20), FEATURE_IDX_RET_20);
+#endif
+#ifdef FEATURE_IDX_RANGE_REL
+   features[FEATURE_IDX_RANGE_REL] = ScaleAndClip((float)((bar.h - bar.l) / (close + 1e-10)), FEATURE_IDX_RANGE_REL);
+#endif
+#ifdef FEATURE_IDX_BODY_REL
+   features[FEATURE_IDX_BODY_REL] = ScaleAndClip((float)((bar.c - bar.o) / (close + 1e-10)), FEATURE_IDX_BODY_REL);
+#endif
+#ifdef FEATURE_IDX_UPPER_WICK_REL
+   features[FEATURE_IDX_UPPER_WICK_REL] = ScaleAndClip(
+      (float)((bar.h - MathMax(bar.o, bar.c)) / (close + 1e-10)),
+      FEATURE_IDX_UPPER_WICK_REL
+   );
+#endif
+#ifdef FEATURE_IDX_LOWER_WICK_REL
+   features[FEATURE_IDX_LOWER_WICK_REL] = ScaleAndClip(
+      (float)((MathMin(bar.o, bar.c) - bar.l) / (close + 1e-10)),
+      FEATURE_IDX_LOWER_WICK_REL
+   );
+#endif
+#ifdef FEATURE_IDX_CLOSE_REL_SMA_9
+   features[FEATURE_IDX_CLOSE_REL_SMA_9] = ScaleAndClip(
+      (float)SafeLogRatio(close, MeanClose(h, 9)),
+      FEATURE_IDX_CLOSE_REL_SMA_9
+   );
+#endif
+#ifdef FEATURE_IDX_CLOSE_REL_SMA_20
+   features[FEATURE_IDX_CLOSE_REL_SMA_20] = ScaleAndClip(
+      (float)SafeLogRatio(close, MeanClose(h, 20)),
+      FEATURE_IDX_CLOSE_REL_SMA_20
+   );
+#endif
+#ifdef FEATURE_IDX_SMA_5_20_GAP
+   features[FEATURE_IDX_SMA_5_20_GAP] = ScaleAndClip(
+      (float)SafeLogRatio(MeanClose(h, 5), MeanClose(h, 20)),
+      FEATURE_IDX_SMA_5_20_GAP
+   );
+#endif
+#ifdef FEATURE_IDX_SMA_9_20_GAP
+   features[FEATURE_IDX_SMA_9_20_GAP] = ScaleAndClip(
+      (float)SafeLogRatio(MeanClose(h, 9), MeanClose(h, 20)),
+      FEATURE_IDX_SMA_9_20_GAP
+   );
+#endif
+#ifdef FEATURE_IDX_SMA_SLOPE_9
+   features[FEATURE_IDX_SMA_SLOPE_9] = ScaleAndClip(
+      (float)SafeLogRatio(MeanClose(h, 9), MeanClose(h + 3, 9)),
+      FEATURE_IDX_SMA_SLOPE_9
+   );
+#endif
+#ifdef FEATURE_IDX_SMA_SLOPE_20
+   features[FEATURE_IDX_SMA_SLOPE_20] = ScaleAndClip(
+      (float)SafeLogRatio(MeanClose(h, 20), MeanClose(h + 3, 20)),
+      FEATURE_IDX_SMA_SLOPE_20
+   );
+#endif
+#ifdef FEATURE_IDX_RSI_6
+   features[FEATURE_IDX_RSI_6] = ScaleAndClip((float)SimpleRsi(h, 6), FEATURE_IDX_RSI_6);
+#endif
+#ifdef FEATURE_IDX_RSI_14
+   features[FEATURE_IDX_RSI_14] = ScaleAndClip((float)SimpleRsi(h, 14), FEATURE_IDX_RSI_14);
+#endif
+#ifdef FEATURE_IDX_STOCH_K_9
+   features[FEATURE_IDX_STOCH_K_9] = ScaleAndClip((float)StochK(h, 9), FEATURE_IDX_STOCH_K_9);
+#endif
+#ifdef FEATURE_IDX_STOCH_D_3
+   features[FEATURE_IDX_STOCH_D_3] = ScaleAndClip((float)StochD(h, 3), FEATURE_IDX_STOCH_D_3);
+#endif
+#ifdef FEATURE_IDX_STOCH_GAP
+   features[FEATURE_IDX_STOCH_GAP] = ScaleAndClip(
+      (float)(StochK(h, 9) - StochD(h, 3)),
+      FEATURE_IDX_STOCH_GAP
+   );
+#endif
+#ifdef FEATURE_IDX_BOLLINGER_POS_20
+   {
+      double sma20 = MeanClose(h, 20);
+      double std20 = StdClose(h, 20);
+      features[FEATURE_IDX_BOLLINGER_POS_20] = ScaleAndClip(
+         (float)((close - sma20) / (2.0 * std20 + 1e-10)),
+         FEATURE_IDX_BOLLINGER_POS_20
+      );
+   }
+#endif
+#ifdef FEATURE_IDX_BOLLINGER_WIDTH_20
+   {
+      double sma20 = MeanClose(h, 20);
+      double std20 = StdClose(h, 20);
+      features[FEATURE_IDX_BOLLINGER_WIDTH_20] = ScaleAndClip(
+         (float)((4.0 * std20) / (sma20 + 1e-10)),
+         FEATURE_IDX_BOLLINGER_WIDTH_20
+      );
+   }
+#endif
+#ifdef FEATURE_IDX_ATR_RATIO_20
+   {
+      double mean_atr = MeanAtrFeature(h, 20);
+      features[FEATURE_IDX_ATR_RATIO_20] = ScaleAndClip(
+         (float)SafeLogRatio(bar.atr_feature, mean_atr),
+         FEATURE_IDX_ATR_RATIO_20
+      );
+   }
+#endif
+#ifdef FEATURE_IDX_RV_18
+   features[FEATURE_IDX_RV_18] = ScaleAndClip((float)RollingStdReturn(h, 18), FEATURE_IDX_RV_18);
+#endif
+#ifdef FEATURE_IDX_DONCHIAN_POS_20
+   {
+      double high20 = MaxHigh(h, 20);
+      double low20 = MinLow(h, 20);
+      features[FEATURE_IDX_DONCHIAN_POS_20] = ScaleAndClip(
+         (float)((close - low20) / (high20 - low20 + 1e-10)),
+         FEATURE_IDX_DONCHIAN_POS_20
+      );
+   }
+#endif
+#ifdef FEATURE_IDX_TICK_COUNT_Z_9
+   {
+      double mean_tc = MeanTickCount(h, 9);
+      double std_tc = StdTickCount(h, 9);
+      double z = (std_tc > 1e-10) ? ((bar.tick_count - mean_tc) / std_tc) : 0.0;
+      features[FEATURE_IDX_TICK_COUNT_Z_9] = ScaleAndClip((float)z, FEATURE_IDX_TICK_COUNT_Z_9);
+   }
+#endif
+#ifdef FEATURE_IDX_TICK_IMBALANCE_SMA_9
+   features[FEATURE_IDX_TICK_IMBALANCE_SMA_9] = ScaleAndClip(
+      (float)MeanTickImbalance(h, 9),
+      FEATURE_IDX_TICK_IMBALANCE_SMA_9
+   );
+#endif
+#ifdef FEATURE_IDX_SPREAD_Z_9
+   {
+      double mean_spread = MeanSpreadRel(h, 9);
+      double std_spread = StdSpreadRel(h, 9);
+      double spread_rel = bar.spread / (close + 1e-10);
+      double z = (std_spread > 1e-10) ? ((spread_rel - mean_spread) / std_spread) : 0.0;
+      features[FEATURE_IDX_SPREAD_Z_9] = ScaleAndClip((float)z, FEATURE_IDX_SPREAD_Z_9);
+   }
+#endif
+#ifdef FEATURE_IDX_USDX_RET1
+   features[FEATURE_IDX_USDX_RET1] = ScaleAndClip(
+      (float)SafeLogRatio(bar.usdx_bid, prev.usdx_bid),
+      FEATURE_IDX_USDX_RET1
+   );
+#endif
+#ifdef FEATURE_IDX_USDJPY_RET1
+   features[FEATURE_IDX_USDJPY_RET1] = ScaleAndClip(
+      (float)SafeLogRatio(bar.usdjpy_bid, prev.usdjpy_bid),
+      FEATURE_IDX_USDJPY_RET1
+   );
+#endif
 }
 
 void Softmax(const float &logits[], float &probs[]) {

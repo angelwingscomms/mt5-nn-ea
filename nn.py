@@ -57,6 +57,8 @@ from model_archive import (
 from mt5_runtime import resolve_mt5_runtime
 from sequence_models import (
     FusionLSTMClassifier,
+    GoldLegacyLSTMAttentionClassifier,
+    GoldNewTemporalClassifier,
     LegacyLSTMAttentionClassifier,
     RecurrentSequenceClassifier,
     TCNClassifier,
@@ -96,6 +98,24 @@ DEFAULT_TCN_KERNEL_SIZE = 3
 DEFAULT_CONFIDENCE_SEARCH_MIN = 0.40
 DEFAULT_CONFIDENCE_SEARCH_MAX = 0.99
 DEFAULT_CONFIDENCE_SEARCH_STEPS = 60
+DEFAULT_PRIMARY_TICK_DENSITY = 27
+GOLD_CONTEXT_FEATURE_COLUMNS = (
+    "usdx_ret1",
+    "usdjpy_ret1",
+)
+GOLD_CONTEXT_TICK_COLUMNS = (
+    "usdx_bid",
+    "usdjpy_bid",
+)
+GOLD_WARNING_SYMBOL = "XAUUSD"
+GOLD_PROFILE_SEQ_LEN = 120
+GOLD_PROFILE_TICK_DENSITY = 27
+GOLD_LEGACY_OLD_TICKS = 2_160_000
+GOLD_LEGACY_OLD_TICK_DENSITY = 144
+GOLD_LEGACY_OLD_RAW_BARS = 15_000
+GOLD_LEGACY_OLD_CANDLES = 72000
+GOLD_LEGACY_OLD_WINDOWS = 72000
+GOLD_LEGACY_EQUIVALENT_27_TICK_BARS = 79_856
 BASE_FEATURE_COLUMNS = (
     "ret1",
     "high_rel_prev",
@@ -178,10 +198,12 @@ FEATURE_ATR_PERIOD = 0
 TARGET_ATR_PERIOD = 0
 RV_PERIOD = 0
 RETURN_PERIOD = 0
+MAX_FEATURE_LOOKBACK = 0
 WARMUP_BARS = 0
 IMBALANCE_MIN_TICKS = 0
 IMBALANCE_EMA_SPAN = 0
 PRIMARY_BAR_SECONDS = 0
+PRIMARY_TICK_DENSITY = 0
 BAR_DURATION_MS = 0
 DEFAULT_FIXED_MOVE = 0.0
 LABEL_SL_MULTIPLIER = 0.0
@@ -194,7 +216,10 @@ DEFAULT_BATCH_SIZE = 0
 DEFAULT_MAX_TRAIN_WINDOWS = 0
 DEFAULT_MAX_EVAL_WINDOWS = 0
 DEFAULT_PATIENCE = 0
+DEFAULT_LOSS_MODE = "cross-entropy"
+USE_NO_HOLD = False
 LABEL_NAMES = ("HOLD", "BUY", "SELL")
+LABEL_NAMES_BINARY = ("BUY", "SELL")
 
 
 def apply_shared_settings(shared: dict[str, int | float | str], shared_config_path: Path | None = None) -> None:
@@ -208,10 +233,12 @@ def apply_shared_settings(shared: dict[str, int | float | str], shared_config_pa
     global TARGET_ATR_PERIOD
     global RV_PERIOD
     global RETURN_PERIOD
+    global MAX_FEATURE_LOOKBACK
     global WARMUP_BARS
     global IMBALANCE_MIN_TICKS
     global IMBALANCE_EMA_SPAN
     global PRIMARY_BAR_SECONDS
+    global PRIMARY_TICK_DENSITY
     global BAR_DURATION_MS
     global DEFAULT_FIXED_MOVE
     global LABEL_SL_MULTIPLIER
@@ -224,6 +251,7 @@ def apply_shared_settings(shared: dict[str, int | float | str], shared_config_pa
     global DEFAULT_MAX_TRAIN_WINDOWS
     global DEFAULT_MAX_EVAL_WINDOWS
     global DEFAULT_PATIENCE
+    global DEFAULT_LOSS_MODE
 
     SHARED = dict(shared)
     if shared_config_path is not None:
@@ -237,10 +265,12 @@ def apply_shared_settings(shared: dict[str, int | float | str], shared_config_pa
     TARGET_ATR_PERIOD = int(SHARED["TARGET_ATR_PERIOD"])
     RV_PERIOD = int(SHARED["RV_PERIOD"])
     RETURN_PERIOD = int(SHARED["RETURN_PERIOD"])
+    MAX_FEATURE_LOOKBACK = int(SHARED["MAX_FEATURE_LOOKBACK"])
     WARMUP_BARS = int(SHARED["WARMUP_BARS"])
     IMBALANCE_MIN_TICKS = int(SHARED["IMBALANCE_MIN_TICKS"])
     IMBALANCE_EMA_SPAN = int(SHARED["IMBALANCE_EMA_SPAN"])
     PRIMARY_BAR_SECONDS = int(SHARED["PRIMARY_BAR_SECONDS"])
+    PRIMARY_TICK_DENSITY = int(SHARED.get("PRIMARY_TICK_DENSITY", DEFAULT_PRIMARY_TICK_DENSITY))
     BAR_DURATION_MS = PRIMARY_BAR_SECONDS * 1000
     DEFAULT_FIXED_MOVE = float(SHARED["DEFAULT_FIXED_MOVE"])
     LABEL_SL_MULTIPLIER = float(SHARED["LABEL_SL_MULTIPLIER"])
@@ -253,6 +283,7 @@ def apply_shared_settings(shared: dict[str, int | float | str], shared_config_pa
     DEFAULT_MAX_TRAIN_WINDOWS = int(SHARED["DEFAULT_MAX_TRAIN_WINDOWS"])
     DEFAULT_MAX_EVAL_WINDOWS = int(SHARED["DEFAULT_MAX_EVAL_WINDOWS"])
     DEFAULT_PATIENCE = int(SHARED["DEFAULT_PATIENCE"])
+    DEFAULT_LOSS_MODE = str(SHARED.get("DEFAULT_LOSS_MODE", "cross-entropy"))
 
 
 def resolve_symbol_training_config(requested_symbol: str) -> tuple[str, Path, dict[str, int | float | str]]:
@@ -280,15 +311,60 @@ def resolve_symbol_training_config(requested_symbol: str) -> tuple[str, Path, di
 apply_shared_settings(load_define_file(SHARED_CONFIG_PATH), SHARED_CONFIG_PATH)
 
 
+def override_shared_config_text(base_text: str, overrides: dict[str, int | float | str]) -> str:
+    lines = base_text.splitlines()
+    output_lines = []
+    define_pattern = re.compile(r"^\s*#define\s+([A-Z0-9_]+)\s+(.+?)\s*$")
+    for line in lines:
+        match = define_pattern.match(line)
+        if not match:
+            output_lines.append(line)
+            continue
+        name, _raw = match.groups()
+        if name in overrides:
+            value = overrides[name]
+            if isinstance(value, str):
+                rendered = f"\"{value}\"" if not value.startswith('"') else value
+            else:
+                rendered = f"{value}"
+            output_lines.append(f"#define {name} {rendered}")
+        else:
+            output_lines.append(line)
+    return "\n".join(output_lines) + "\n"
+
+
+def materialize_profile_shared_config(
+    shared_config_path: Path,
+    overrides: dict[str, int | float | str],
+    suffix: str,
+) -> Path:
+    target_path = shared_config_path.with_name(f"shared_config_{suffix}.mqh")
+    base_text = shared_config_path.read_text(encoding="utf-8")
+    target_path.write_text(override_shared_config_text(base_text, overrides), encoding="utf-8")
+    return target_path
+
+
+def symbol_ticks_path(symbol: str) -> Path:
+    return Path("data") / symbol.strip().upper() / "ticks.csv"
+
+
 def feature_macro_name(feature_name: str) -> str:
     if feature_name == "ret_n":
         return "FEATURE_IDX_RETURN_N"
     return f"FEATURE_IDX_{feature_name.upper()}"
 
 
-def resolve_feature_columns(architecture: str, use_extended_features: bool) -> tuple[str, ...]:
+def resolve_feature_columns(
+    architecture: str,
+    use_extended_features: bool,
+    use_gold_context: bool,
+) -> tuple[str, ...]:
     if architecture == "chronos_bolt":
         return BASE_FEATURE_COLUMNS
+    if architecture in {"gold_legacy", "gold_new"} or use_gold_context:
+        if use_extended_features:
+            return BASE_FEATURE_COLUMNS + GOLD_CONTEXT_FEATURE_COLUMNS + SEQUENCE_EXTRA_FEATURES
+        return BASE_FEATURE_COLUMNS + GOLD_CONTEXT_FEATURE_COLUMNS
     if not use_extended_features:
         return BASE_FEATURE_COLUMNS
     if architecture == "minirocket":
@@ -296,13 +372,19 @@ def resolve_feature_columns(architecture: str, use_extended_features: bool) -> t
     return BASE_FEATURE_COLUMNS + SEQUENCE_EXTRA_FEATURES
 
 
-def resolve_feature_profile(architecture: str, use_extended_features: bool) -> str:
+def resolve_feature_profile(
+    architecture: str,
+    use_extended_features: bool,
+    use_gold_context: bool,
+) -> str:
     if architecture == "chronos_bolt":
         return "chronos_bolt_ret1_core"
-    if not use_extended_features:
+    if not use_extended_features and not use_gold_context and architecture not in {"gold_legacy", "gold_new"}:
         return "core"
     if architecture == "minirocket":
         return "minirocket_extended"
+    if architecture in {"gold_legacy", "gold_new"} or use_gold_context:
+        return "gold_context_extended"
     return "sequence_extended"
 
 
@@ -315,6 +397,38 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
         type=str,
         default=selected_symbol,
         help="Symbol config to load from models/<SYMBOL>/config/shared_config.mqh.",
+    )
+    parser.add_argument(
+        "-gold",
+        "--gold",
+        dest="gold",
+        action="store_true",
+        help=(
+            "Gold legacy profile: uses the old LSTM+MHA+GAP classifier on 27-tick bars with XAUUSD + USDX/USDJPY."
+        ),
+    )
+    parser.add_argument(
+        "-gold-new",
+        "--gold-new",
+        dest="gold_new",
+        action="store_true",
+        help="Gold upgraded profile: CNN+GRU+attention pooling on 27-tick bars with XAUUSD + USDX/USDJPY.",
+    )
+    parser.add_argument(
+        "--primary-tick-density",
+        type=int,
+        default=DEFAULT_PRIMARY_TICK_DENSITY,
+        help="Ticks per bar when --use-fixed-tick-bars is enabled.",
+    )
+    parser.add_argument(
+        "--use-fixed-tick-bars",
+        action="store_true",
+        help="Build fixed tick-density bars instead of imbalance/fixed-time bars.",
+    )
+    parser.add_argument(
+        "--gold-context",
+        action="store_true",
+        help="Expect USDX/USDJPY columns in the input CSV and add return features from them.",
     )
     parser.add_argument("--data-file", type=str, default=DEFAULT_DATA_FILE, help="CSV with time_msc,bid,ask.")
     parser.add_argument("--output-file", type=str, default=DEFAULT_OUTPUT_FILE, help="ONNX output file.")
@@ -337,6 +451,12 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
         type=int,
         default=int(shared["DEFAULT_MAX_EVAL_WINDOWS"]),
         help="Validation/test window cap.",
+    )
+    parser.add_argument(
+        "--max-bars",
+        type=int,
+        default=0,
+        help="Optional cap on the number of bars used for training (0 = no cap).",
     )
     parser.add_argument("--patience", type=int, default=int(shared["DEFAULT_PATIENCE"]), help="Early stopping patience.")
     parser.add_argument("--device", type=str, default="cpu", help="Torch device to use. Defaults to cpu.")
@@ -369,6 +489,13 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
             "pack; the sequence encoders (Mamba, Castor, ELA, Fusion-LSTM, BiLSTM, GRU, TCN) get an "
             "indicator/regime-heavy pack."
         ),
+    )
+    parser.add_argument(
+        "-nh",
+        "--no-hold",
+        dest="no_hold",
+        action="store_true",
+        help="Train a binary classifier that predicts only BUY or SELL (removes HOLD class).",
     )
     architecture_group = parser.add_mutually_exclusive_group()
     architecture_group.add_argument(
@@ -611,14 +738,39 @@ def build_arg_parser(selected_symbol: str, shared: dict[str, int | float | str])
 def parse_args() -> argparse.Namespace:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--symbol", type=str, default="")
+    bootstrap.add_argument("-gold", "--gold", dest="gold", action="store_true")
+    bootstrap.add_argument("-gold-new", "--gold-new", dest="gold_new", action="store_true")
     bootstrap_args, _ = bootstrap.parse_known_args()
     selected_symbol, _shared_config_path, shared = resolve_symbol_training_config(bootstrap_args.symbol)
-    return build_arg_parser(selected_symbol, shared).parse_args()
+    parser = build_arg_parser(selected_symbol, shared)
+    args = parser.parse_args()
+    if args.gold or args.gold_new:
+        args.use_extended_features = True
+        args.use_fixed_tick_bars = True
+        args.primary_tick_density = GOLD_PROFILE_TICK_DENSITY
+        args.gold_context = True
+        if args.gold:
+            args.max_bars = GOLD_LEGACY_OLD_CANDLES
+        if args.gold:
+            args.use_legacy_lstm_attention = False
+            args.use_minirocket_encoder = False
+            args.use_castor_encoder = False
+            args.use_fusion_lstm_encoder = False
+            args.use_bilstm_encoder = False
+            args.use_gru_encoder = False
+            args.use_tcn_encoder = False
+            args.use_tla_encoder = False
+            args.use_chronos_bolt = False
+    return args
 
 
 def resolve_architecture(args: argparse.Namespace) -> str:
     if args.use_chronos_bolt:
         return "chronos_bolt"
+    if args.gold:
+        return "gold_legacy"
+    if args.gold_new:
+        return "gold_new"
     if args.use_legacy_lstm_attention:
         return "legacy_lstm_attention"
     if args.ela:
@@ -808,6 +960,12 @@ def build_time_bar_ids(time_msc: np.ndarray) -> np.ndarray:
     return time_msc // BAR_DURATION_MS
 
 
+def build_tick_bar_ids(tick_count: int, tick_density: int) -> np.ndarray:
+    if tick_density <= 0:
+        raise ValueError("PRIMARY_TICK_DENSITY must be positive.")
+    return np.arange(tick_count, dtype=np.int64) // int(tick_density)
+
+
 def infer_point_size_from_ticks(df_ticks: pd.DataFrame, max_samples: int = 200_000) -> float:
     prices = np.concatenate(
         [
@@ -835,25 +993,80 @@ def infer_point_size_from_ticks(df_ticks: pd.DataFrame, max_samples: int = 200_0
     return float(point_size if point_size > 0.0 else 1.0)
 
 
-def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> tuple[pd.DataFrame, float]:
+def build_market_bars(
+    csv_path: Path,
+    use_fixed_time_bars: bool,
+    use_fixed_tick_bars: bool,
+    tick_density: int,
+    max_bars: int,
+    require_gold_context: bool = False,
+) -> tuple[pd.DataFrame, float]:
     t0 = time.time()
     chunks = []
+    extended_usecols = ["time_msc", "bid", "ask", *GOLD_CONTEXT_TICK_COLUMNS]
+    legacy_usecols = ["time_msc", "bid", "ask", "usdx", "usdjpy"]
+    base_usecols = ["time_msc", "bid", "ask"]
     read_csv_kwargs = {
         "filepath_or_buffer": csv_path,
-        "usecols": ["time_msc", "bid", "ask"],
-        "dtype": {"time_msc": np.int64, "bid": np.float64, "ask": np.float64},
+        "usecols": extended_usecols,
+        "dtype": {
+            "time_msc": np.int64,
+            "bid": np.float64,
+            "ask": np.float64,
+            "usdx_bid": np.float64,
+            "usdjpy_bid": np.float64,
+        },
         "chunksize": 50000,
     }
     try:
         for chunk in pd.read_csv(**read_csv_kwargs):
             chunks.append(chunk)
+    except ValueError:
+        chunks.clear()
+        try:
+            read_csv_kwargs["usecols"] = legacy_usecols
+            read_csv_kwargs["dtype"] = {
+                "time_msc": np.int64,
+                "bid": np.float64,
+                "ask": np.float64,
+                "usdx": np.float64,
+                "usdjpy": np.float64,
+            }
+            for chunk in pd.read_csv(**read_csv_kwargs):
+                chunks.append(chunk)
+        except ValueError:
+            chunks.clear()
+            read_csv_kwargs["usecols"] = base_usecols
+            read_csv_kwargs["dtype"] = {"time_msc": np.int64, "bid": np.float64, "ask": np.float64}
+            for chunk in pd.read_csv(**read_csv_kwargs):
+                chunks.append(chunk)
     except pd.errors.ParserError as exc:
         if "out of memory" not in str(exc).lower():
             raise
         log.warning("Default CSV parser ran out of memory for %s; retrying with engine=python.", csv_path)
         chunks.clear()
-        for chunk in pd.read_csv(**read_csv_kwargs, engine="python"):
-            chunks.append(chunk)
+        try:
+            for chunk in pd.read_csv(**read_csv_kwargs, engine="python"):
+                chunks.append(chunk)
+        except ValueError:
+            chunks.clear()
+            try:
+                read_csv_kwargs["usecols"] = legacy_usecols
+                read_csv_kwargs["dtype"] = {
+                    "time_msc": np.int64,
+                    "bid": np.float64,
+                    "ask": np.float64,
+                    "usdx": np.float64,
+                    "usdjpy": np.float64,
+                }
+                for chunk in pd.read_csv(**read_csv_kwargs, engine="python"):
+                    chunks.append(chunk)
+            except ValueError:
+                chunks.clear()
+                read_csv_kwargs["usecols"] = base_usecols
+                read_csv_kwargs["dtype"] = {"time_msc": np.int64, "bid": np.float64, "ask": np.float64}
+                for chunk in pd.read_csv(**read_csv_kwargs, engine="python"):
+                    chunks.append(chunk)
     df = pd.concat(chunks, ignore_index=True)
     if not df["time_msc"].is_monotonic_increasing:
         df = df.sort_values("time_msc").reset_index(drop=True)
@@ -861,10 +1074,66 @@ def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> tuple[pd.Dat
         df = df.reset_index(drop=True)
     if df.empty:
         raise ValueError(f"No ticks found in {csv_path}")
+    if "usdx_bid" not in df.columns:
+        if "usdx" in df.columns:
+            df["usdx_bid"] = df["usdx"]
+        else:
+            df["usdx_bid"] = np.nan
+    if "usdjpy_bid" not in df.columns:
+        if "usdjpy" in df.columns:
+            df["usdjpy_bid"] = df["usdjpy"]
+        else:
+            df["usdjpy_bid"] = np.nan
+    if require_gold_context:
+        missing_columns = [name for name in GOLD_CONTEXT_TICK_COLUMNS if name not in df.columns]
+        if missing_columns:
+            raise ValueError(
+                "Gold training requires auxiliary columns "
+                f"{missing_columns} in {csv_path}. Re-export with `python export_data.py --profile gold --symbol XAUUSD`."
+            )
+        empty_columns = [name for name in GOLD_CONTEXT_TICK_COLUMNS if df[name].notna().sum() == 0]
+        if empty_columns:
+            raise ValueError(
+                "Gold training found empty auxiliary columns "
+                f"{empty_columns} in {csv_path}. Re-export with `python export_data.py --profile gold --symbol XAUUSD`."
+            )
     point_size = infer_point_size_from_ticks(df)
 
     df["tick_sign"] = compute_tick_signs(df["bid"].to_numpy(dtype=np.float64, copy=False))
     df["spread"] = df["ask"] - df["bid"]
+
+    if use_fixed_tick_bars:
+        df["bar_id"] = build_tick_bar_ids(len(df), tick_density)
+        grouped = (
+            df.groupby("bar_id", sort=True)
+            .agg(
+                open=("bid", "first"),
+                high=("bid", "max"),
+                low=("bid", "min"),
+                close=("bid", "last"),
+                tick_count=("bid", "size"),
+                tick_imbalance=("tick_sign", "mean"),
+                ask_high=("ask", "max"),
+                ask_low=("ask", "min"),
+                spread=("spread", "last"),
+                time_open=("time_msc", "first"),
+                time_close=("time_msc", "last"),
+                usdx_bid=("usdx_bid", "last"),
+                usdjpy_bid=("usdjpy_bid", "last"),
+            )
+            .reset_index(drop=True)
+        )
+        if max_bars > 0 and len(grouped) > max_bars:
+            grouped = grouped.iloc[:max_bars].reset_index(drop=True)
+            log.info("Capped fixed-tick bars to %d rows.", max_bars)
+        log.info(
+            "Built %d bars in %.2fs using fixed %d-tick bars | point_size=%.8f",
+            len(grouped),
+            time.time() - t0,
+            tick_density,
+            point_size,
+        )
+        return grouped, point_size
 
     if use_fixed_time_bars:
         df["bar_id"] = build_time_bar_ids(df["time_msc"].to_numpy(dtype=np.int64, copy=False))
@@ -880,12 +1149,17 @@ def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> tuple[pd.Dat
                 ask_high=("ask", "max"),
                 ask_low=("ask", "min"),
                 spread=("spread", "last"),
+                usdx_bid=("usdx_bid", "last"),
+                usdjpy_bid=("usdjpy_bid", "last"),
             )
             .reset_index()
         )
         grouped["time_open"] = grouped["bar_id"] * BAR_DURATION_MS
         grouped["time_close"] = grouped["time_open"] + BAR_DURATION_MS
         grouped = grouped.drop(columns=["bar_id"])
+        if max_bars > 0 and len(grouped) > max_bars:
+            grouped = grouped.iloc[:max_bars].reset_index(drop=True)
+            log.info("Capped fixed-time bars to %d rows.", max_bars)
         log.info(
             "Built %d bars in %.2fs using fixed %ds bars | point_size=%.8f",
             len(grouped),
@@ -910,9 +1184,14 @@ def build_market_bars(csv_path: Path, use_fixed_time_bars: bool) -> tuple[pd.Dat
             ask_high=("ask", "max"),
             ask_low=("ask", "min"),
             spread=("spread", "last"),
+            usdx_bid=("usdx_bid", "last"),
+            usdjpy_bid=("usdjpy_bid", "last"),
         )
         .reset_index(drop=True)
     )
+    if max_bars > 0 and len(grouped) > max_bars:
+        grouped = grouped.iloc[:max_bars].reset_index(drop=True)
+        log.info("Capped imbalance bars to %d rows.", max_bars)
     log.info(
         "Built %d bars in %.2fs using imbalance bars min_ticks=%d span=%d | point_size=%.8f",
         len(grouped),
@@ -985,6 +1264,28 @@ def compute_features(df: pd.DataFrame, feature_columns: tuple[str, ...]) -> np.n
     feat["rv"] = rolling_population_std(ret1, RV_PERIOD)
     feat["ret_n"] = np.log(close / (close.shift(RETURN_PERIOD) + EPS))
     feat["tick_imbalance"] = tick_imbalance
+
+    requires_gold_context = any(name in feature_columns for name in GOLD_CONTEXT_FEATURE_COLUMNS)
+    usdx_bid = df.get("usdx_bid")
+    usdjpy_bid = df.get("usdjpy_bid")
+    if requires_gold_context:
+        if usdx_bid is None or usdjpy_bid is None:
+            raise ValueError("Gold-context features requested but auxiliary columns are missing from the bar data.")
+        if usdx_bid.notna().sum() == 0 or usdjpy_bid.notna().sum() == 0:
+            raise ValueError("Gold-context features requested but auxiliary columns are empty after bar construction.")
+        usdx_bid = usdx_bid.ffill().bfill()
+        usdjpy_bid = usdjpy_bid.ffill().bfill()
+    else:
+        if usdx_bid is None:
+            usdx_bid = close
+        else:
+            usdx_bid = usdx_bid.fillna(close)
+        if usdjpy_bid is None:
+            usdjpy_bid = close
+        else:
+            usdjpy_bid = usdjpy_bid.fillna(close)
+    feat["usdx_ret1"] = np.log(usdx_bid / (usdx_bid.shift(1) + EPS))
+    feat["usdjpy_ret1"] = np.log(usdjpy_bid / (usdjpy_bid.shift(1) + EPS))
 
     feat["ret_2"] = np.log(close / (close.shift(2) + EPS))
     feat["ret_3"] = np.log(close / (close.shift(3) + EPS))
@@ -1235,7 +1536,10 @@ def softmax(logits: np.ndarray) -> np.ndarray:
 def gate_metrics(labels: np.ndarray, probs: np.ndarray, threshold: float) -> dict[str, float | int]:
     preds = probs.argmax(axis=1)
     confidences = probs.max(axis=1)
-    selected = (preds > 0) & (confidences >= threshold)
+    if probs.shape[1] == 2:
+        selected = confidences >= threshold
+    else:
+        selected = (preds > 0) & (confidences >= threshold)
     selected_trades = int(selected.sum())
     precision = float((preds[selected] == labels[selected]).mean()) if selected_trades else float("nan")
     selected_mean_confidence = float(confidences[selected].mean()) if selected_trades else float("nan")
@@ -1261,11 +1565,20 @@ def choose_confidence_threshold(
     threshold_steps: int,
 ) -> float:
     preds = probs.argmax(axis=1)
-    candidate_mask = preds > 0
+    confidences = probs.max(axis=1)
+    is_binary = probs.shape[1] == 2
+    if is_binary:
+        candidate_mask = np.ones(len(preds), dtype=bool)
+    else:
+        candidate_mask = preds > 0
     threshold_min = min(max(0.0, float(threshold_min)), 0.999999)
     threshold_max = min(max(threshold_min, float(threshold_max)), 0.999999)
     threshold_steps = max(2, int(threshold_steps))
-    if not candidate_mask.any():
+    if is_binary:
+        candidate_count = len(preds)
+    else:
+        candidate_count = int(candidate_mask.sum())
+    if candidate_count == 0:
         log.warning(
             "Confidence gate selection: model produced no BUY/SELL predictions; falling back to threshold %.2f.",
             threshold_min,
@@ -1281,7 +1594,6 @@ def choose_confidence_threshold(
     relaxed_precision = -1.0
     relaxed_selected = -1
     relaxed_coverage = -1.0
-    confidences = probs.max(axis=1)
     found_candidate = False
     found_relaxed_candidate = False
 
@@ -1358,19 +1670,23 @@ def summarize_gate(name: str, probs: np.ndarray, labels: np.ndarray, threshold: 
     return metrics
 
 
-def class_count_lines(labels: np.ndarray) -> list[str]:
-    counts = np.bincount(labels, minlength=len(LABEL_NAMES))
-    return [f"{LABEL_NAMES[i]}: {int(counts[i])}" for i in range(len(LABEL_NAMES))]
+def class_count_lines(labels: np.ndarray, label_names: tuple[str, ...] | None = None) -> list[str]:
+    if label_names is None:
+        label_names = LABEL_NAMES
+    counts = np.bincount(labels, minlength=len(label_names))
+    return [f"{label_names[i]}: {int(counts[i])}" for i in range(len(label_names))]
 
 
-def confusion_matrix_df(labels: np.ndarray, preds: np.ndarray) -> pd.DataFrame:
-    matrix = np.zeros((len(LABEL_NAMES), len(LABEL_NAMES)), dtype=np.int64)
+def confusion_matrix_df(labels: np.ndarray, preds: np.ndarray, label_names: tuple[str, ...] | None = None) -> pd.DataFrame:
+    if label_names is None:
+        label_names = LABEL_NAMES
+    matrix = np.zeros((len(label_names), len(label_names)), dtype=np.int64)
     for true_label, pred_label in zip(labels.astype(np.int64), preds.astype(np.int64)):
         matrix[true_label, pred_label] += 1
     return pd.DataFrame(
         matrix,
-        index=[f"true_{name.lower()}" for name in LABEL_NAMES],
-        columns=[f"pred_{name.lower()}" for name in LABEL_NAMES],
+        index=[f"true_{name.lower()}" for name in label_names],
+        columns=[f"pred_{name.lower()}" for name in label_names],
     )
 
 
@@ -1389,21 +1705,30 @@ def summarize_numeric(values: np.ndarray, label: str) -> list[str]:
 def build_prediction_frame(labels: np.ndarray, probs: np.ndarray, threshold: float) -> pd.DataFrame:
     preds = probs.argmax(axis=1)
     confidences = probs.max(axis=1)
-    selected = (preds > 0) & (confidences >= threshold)
+    if probs.shape[1] == 2:
+        active_names = LABEL_NAMES_BINARY
+        selected = (confidences >= threshold)
+    else:
+        active_names = LABEL_NAMES
+        selected = (preds > 0) & (confidences >= threshold)
     frame = pd.DataFrame(
         {
             "true_label": labels.astype(np.int64),
             "pred_label": preds.astype(np.int64),
-            "true_name": [LABEL_NAMES[int(v)] for v in labels],
-            "pred_name": [LABEL_NAMES[int(v)] for v in preds],
-            "prob_hold": probs[:, 0],
-            "prob_buy": probs[:, 1],
-            "prob_sell": probs[:, 2],
+            "true_name": [active_names[int(v)] for v in labels],
+            "pred_name": [active_names[int(v)] for v in preds],
             "confidence": confidences,
             "selected_trade": selected.astype(np.int64),
             "correct": (preds == labels).astype(np.int64),
         }
     )
+    if probs.shape[1] == 3:
+        frame["prob_hold"] = probs[:, 0]
+        frame["prob_buy"] = probs[:, 1]
+        frame["prob_sell"] = probs[:, 2]
+    else:
+        frame["prob_buy"] = probs[:, 0]
+        frame["prob_sell"] = probs[:, 1]
     return frame
 
 
@@ -1435,13 +1760,20 @@ def write_diagnostics(
     feature_profile: str,
     point_size: float,
     fixed_move_price: float,
+    use_fixed_tick_bars: bool,
+    tick_density: int,
 ) -> None:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
+    active_label_names = LABEL_NAMES_BINARY if val_probs.shape[1] == 2 else LABEL_NAMES
     val_predictions = build_prediction_frame(y_val, val_probs, selected_primary_confidence)
     test_predictions = build_prediction_frame(y_test, test_probs, selected_primary_confidence)
-    val_confusion = confusion_matrix_df(y_val, val_predictions["pred_label"].to_numpy(dtype=np.int64))
-    test_confusion = confusion_matrix_df(y_test, test_predictions["pred_label"].to_numpy(dtype=np.int64))
+    val_confusion = confusion_matrix_df(
+        y_val, val_predictions["pred_label"].to_numpy(dtype=np.int64), active_label_names
+    )
+    test_confusion = confusion_matrix_df(
+        y_test, test_predictions["pred_label"].to_numpy(dtype=np.int64), active_label_names
+    )
 
     bar_stats = bars.loc[
         :,
@@ -1476,14 +1808,18 @@ def write_diagnostics(
         "## Shared Config",
         f"- seq_len: {SEQ_LEN}",
         f"- target_horizon: {TARGET_HORIZON}",
-        f"- bar_mode: {'FIXED_TIME' if use_fixed_time_bars else 'IMBALANCE'}",
+        f"- bar_mode: {'FIXED_TICK' if use_fixed_tick_bars else ('FIXED_TIME' if use_fixed_time_bars else 'IMBALANCE')}",
         *(
             [f"- primary_bar_seconds: {PRIMARY_BAR_SECONDS}"]
             if use_fixed_time_bars
-            else [
-                f"- imbalance_min_ticks: {IMBALANCE_MIN_TICKS}",
-                f"- imbalance_ema_span: {IMBALANCE_EMA_SPAN}",
-            ]
+            else (
+                [f"- primary_tick_density: {tick_density}"]
+                if use_fixed_tick_bars
+                else [
+                    f"- imbalance_min_ticks: {IMBALANCE_MIN_TICKS}",
+                    f"- imbalance_ema_span: {IMBALANCE_EMA_SPAN}",
+                ]
+            )
         ),
         f"- feature_atr_period: {FEATURE_ATR_PERIOD}",
         f"- target_atr_period: {TARGET_ATR_PERIOD}",
@@ -1511,13 +1847,13 @@ def write_diagnostics(
         "",
         "## Label Counts",
         "- full bars:",
-        *[f"  - {line}" for line in class_count_lines(y_full)],
+        *[f"  - {line}" for line in class_count_lines(y_full, active_label_names)],
         "- train windows:",
-        *[f"  - {line}" for line in class_count_lines(y_train)],
+        *[f"  - {line}" for line in class_count_lines(y_train, active_label_names)],
         "- validation windows:",
-        *[f"  - {line}" for line in class_count_lines(y_val)],
+        *[f"  - {line}" for line in class_count_lines(y_val, active_label_names)],
         "- holdout windows:",
-        *[f"  - {line}" for line in class_count_lines(y_test)],
+        *[f"  - {line}" for line in class_count_lines(y_test, active_label_names)],
         "",
         "## Window Usage",
         f"- train_available: {available_window_counts['train']}",
@@ -1555,7 +1891,11 @@ def write_diagnostics(
         *(
             [f"- Bars are fixed-duration time buckets aligned to epoch time. Change PRIMARY_BAR_SECONDS in {CURRENT_SHARED_CONFIG_PATH.name} to retune them, for example to 27 or 9 seconds."]
             if use_fixed_time_bars
-            else ["- Imbalance bars are variable by design. Lowering imbalance_min_ticks makes them smaller on average, but it does not force a fixed tick count per bar."]
+            else (
+                [f"- Fixed-tick bars use PRIMARY_TICK_DENSITY in {CURRENT_SHARED_CONFIG_PATH.name} to set ticks per bar."]
+                if use_fixed_tick_bars
+                else ["- Imbalance bars are variable by design. Lowering imbalance_min_ticks makes them smaller on average, but it does not force a fixed tick count per bar."]
+            )
         ),
         "- In ATR mode, labels use the stricter label_sl_multiplier and label_tp_multiplier values, so a BUY/SELL label means price reached the target before making more than a tiny adverse move.",
         "- In fixed mode, labels use the same DEFAULT_FIXED_MOVE value in symbol points for both stop loss and take profit.",
@@ -1579,6 +1919,7 @@ def build_mql_config(
     feature_columns: tuple[str, ...],
     feature_profile: str,
     use_extended_features: bool,
+    use_fixed_tick_bars: bool,
 ) -> str:
     feature_macro_lines = [
         "#ifdef MODEL_FEATURE_COUNT",
@@ -1601,6 +1942,7 @@ def build_mql_config(
         [
             "// Auto-generated by nn.py. Re-run training to refresh these values.",
             "// Shared static values live in shared_config.mqh.",
+            f"#define MODEL_USE_FIXED_TICK_BARS {1 if use_fixed_tick_bars else 0}",
             f"#define MODEL_USE_ATR_RISK {1 if use_atr_risk else 0}",
             f"#define MODEL_USE_FIXED_TIME_BARS {1 if use_fixed_time_bars else 0}",
             f'#define MODEL_ARCHITECTURE "{architecture}"',
@@ -1618,6 +1960,12 @@ def build_mql_config(
             f"#define MODEL_USE_CHRONOS {1 if architecture == 'chronos_bolt' else 0}",
             f"#define MODEL_USE_CHRONOS_BOLT {1 if architecture == 'chronos_bolt' else 0}",
             f"#define MODEL_USE_MULTIHEAD_ATTENTION {1 if use_multihead_attention else 0}",
+            (
+                "// Gold legacy reference: old/nn.py trained on 2,160,000 ticks (tick_density=144) -> "
+                "14,856 bars -> 14,707 windows (seq_len=120, horizon=30)."
+                if architecture == "gold_legacy"
+                else ""
+            ),
             *feature_macro_lines,
             f"#define PRIMARY_CONFIDENCE {primary_confidence:.8f}",
             f"float medians[MODEL_FEATURE_COUNT] = {{{format_float_array(median)}}};",
@@ -1631,13 +1979,30 @@ def resolve_loss_mode(_architecture: str, requested_mode: str) -> str:
         return "zero-shot"
     if requested_mode != "auto":
         return requested_mode
-    return SHARED.get("DEFAULT_LOSS_MODE", "focal")
+    return DEFAULT_LOSS_MODE
 
 
 def main() -> None:
     t0 = time.time()
     args = parse_args()
     selected_symbol, selected_shared_config_path, selected_shared = resolve_symbol_training_config(args.symbol)
+    if (args.gold or args.gold_new) and args.data_file == DEFAULT_DATA_FILE:
+        args.data_file = str(symbol_ticks_path(selected_symbol))
+    if args.gold or args.gold_new:
+        overrides = {
+            "SEQ_LEN": GOLD_PROFILE_SEQ_LEN,
+            "PRIMARY_TICK_DENSITY": GOLD_PROFILE_TICK_DENSITY,
+            "USE_ALL_WINDOWS": 1,
+            "DEFAULT_BATCH_SIZE": 64,
+            "DEFAULT_EPOCHS": 54,
+        }
+        profile_suffix = "gold" if args.gold else "gold_new"
+        selected_shared_config_path = materialize_profile_shared_config(
+            selected_shared_config_path,
+            overrides,
+            suffix=profile_suffix,
+        )
+        selected_shared = load_define_file(selected_shared_config_path)
     apply_shared_settings(selected_shared, selected_shared_config_path)
     args.symbol = selected_symbol
     torch.manual_seed(42)
@@ -1650,15 +2015,50 @@ def main() -> None:
     elif requested_model_name and model_name != requested_model_name:
         log.info("Model folder prefix sanitized from %r to %r.", requested_model_name, model_name)
     use_extended_features = bool(args.use_extended_features)
+    use_atr_risk = not bool(args.use_fixed_risk)
+    use_fixed_time_bars = bool(args.use_fixed_time_bars)
+    use_fixed_tick_bars = bool(args.use_fixed_tick_bars)
+    use_no_hold = bool(args.no_hold)
+    active_label_names = LABEL_NAMES_BINARY if use_no_hold else LABEL_NAMES
+    if args.gold or args.gold_new:
+        if args.symbol.strip().upper() != GOLD_WARNING_SYMBOL:
+            log.warning(
+                "Gold profile is tuned for %s; you requested %s.",
+                GOLD_WARNING_SYMBOL,
+                args.symbol,
+            )
+        if SEQ_LEN != GOLD_PROFILE_SEQ_LEN:
+            log.warning(
+                "Gold profile expects seq_len=%d; current shared_config uses %d.",
+                GOLD_PROFILE_SEQ_LEN,
+                SEQ_LEN,
+            )
+        use_fixed_tick_bars = True
+        use_fixed_time_bars = False
+    if args.gold and int(args.max_bars) == GOLD_LEGACY_OLD_CANDLES and args.primary_tick_density != GOLD_LEGACY_OLD_TICK_DENSITY:
+        log.warning(
+            "Gold legacy is matching the old bar count (%d) but not the old tick span: %d bars x %d ticks = %d ticks, "
+            "vs old %d ticks at %d ticks/bar. Matching the old tick span at %d ticks/bar would require about %d bars.",
+            GOLD_LEGACY_OLD_CANDLES,
+            GOLD_LEGACY_OLD_CANDLES,
+            args.primary_tick_density,
+            GOLD_LEGACY_OLD_CANDLES * args.primary_tick_density,
+            GOLD_LEGACY_OLD_TICKS,
+            GOLD_LEGACY_OLD_TICK_DENSITY,
+            args.primary_tick_density,
+            GOLD_LEGACY_EQUIVALENT_27_TICK_BARS,
+        )
     if architecture == "chronos_bolt" and use_extended_features:
         log.warning("Chronos-Bolt backend uses the base live feature pack; ignoring --use-extended-features.")
         use_extended_features = False
-    feature_columns = resolve_feature_columns(architecture, use_extended_features)
-    feature_profile = resolve_feature_profile(architecture, use_extended_features)
+    feature_columns = resolve_feature_columns(architecture, use_extended_features, use_gold_context=bool(args.gold_context))
+    feature_profile = resolve_feature_profile(architecture, use_extended_features, use_gold_context=bool(args.gold_context))
     feature_count = len(feature_columns)
     use_multihead_attention = bool(args.use_multihead_attention)
-    use_atr_risk = not bool(args.use_fixed_risk)
-    use_fixed_time_bars = bool(args.use_fixed_time_bars)
+    if args.gold:
+        use_multihead_attention = True
+    if use_fixed_tick_bars and use_fixed_time_bars:
+        raise ValueError("Choose only one bar mode: fixed-time or fixed-tick.")
     if architecture == "legacy_lstm_attention":
         if use_multihead_attention:
             log.info("Legacy LSTM attention architecture has built-in self-attention; the -a flag is redundant.")
@@ -1719,6 +2119,8 @@ def main() -> None:
         log.warning("Chronos context flags are ignored unless --chronos-bolt is enabled.")
     if use_fixed_time_bars and PRIMARY_BAR_SECONDS <= 0:
         raise ValueError("PRIMARY_BAR_SECONDS must be positive.")
+    if use_fixed_tick_bars and args.primary_tick_density <= 0:
+        raise ValueError("PRIMARY_TICK_DENSITY must be positive.")
     if DEFAULT_FIXED_MOVE <= 0.0:
         raise ValueError("DEFAULT_FIXED_MOVE must be positive in points.")
 
@@ -1741,7 +2143,7 @@ def main() -> None:
     log.info("Using device: %s", device)
     log.info(
         "Shared config | path=%s seq_len=%d horizon=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
-        "bar_mode=%s imbalance_min_ticks=%d imbalance_ema_span=%d bar_seconds=%d risk_mode=%s fixed_move_points=%.2f "
+        "bar_mode=%s imbalance_min_ticks=%d imbalance_ema_span=%d bar_seconds=%d tick_density=%d risk_mode=%s fixed_move_points=%.2f "
         "label_sl=%.2f label_tp=%.2f exec_sl=%.2f exec_tp=%.2f use_all_windows=%d",
         CURRENT_SHARED_CONFIG_PATH,
         SEQ_LEN,
@@ -1750,10 +2152,11 @@ def main() -> None:
         TARGET_ATR_PERIOD,
         RV_PERIOD,
         RETURN_PERIOD,
-        "FIXED_TIME" if use_fixed_time_bars else "IMBALANCE",
+        "FIXED_TICK" if use_fixed_tick_bars else ("FIXED_TIME" if use_fixed_time_bars else "IMBALANCE"),
         IMBALANCE_MIN_TICKS,
         IMBALANCE_EMA_SPAN,
         PRIMARY_BAR_SECONDS,
+        args.primary_tick_density,
         "ATR" if use_atr_risk else "FIXED",
         DEFAULT_FIXED_MOVE,
         LABEL_SL_MULTIPLIER,
@@ -1772,7 +2175,14 @@ def main() -> None:
         feature_count,
     )
 
-    bars, point_size = build_market_bars(data_path, use_fixed_time_bars=use_fixed_time_bars)
+    bars, point_size = build_market_bars(
+        data_path,
+        use_fixed_time_bars=use_fixed_time_bars,
+        use_fixed_tick_bars=use_fixed_tick_bars,
+        tick_density=args.primary_tick_density,
+        max_bars=int(args.max_bars),
+        require_gold_context=bool(args.gold_context),
+    )
     fixed_move_price = fixed_move_price_distance(DEFAULT_FIXED_MOVE, point_size)
     log.info(
         "Fixed risk config | fixed_move_points=%.2f point_size=%.8f fixed_move_price=%.8f",
@@ -1826,6 +2236,23 @@ def main() -> None:
     x_val, y_val = build_windows(x_scaled, y, val_end_idx, SEQ_LEN)
     x_test, y_test = build_windows(x_scaled, y, test_end_idx, SEQ_LEN)
     log.info("Window counts | train=%d val=%d test=%d", len(x_train), len(x_val), len(x_test))
+
+    if use_no_hold:
+        train_mask = y_train > 0
+        val_mask = y_val > 0
+        test_mask = y_test > 0
+        x_train = x_train[train_mask]
+        y_train = y_train[train_mask] - 1
+        x_val = x_val[val_mask]
+        y_val = y_val[val_mask] - 1
+        x_test = x_test[test_mask]
+        y_test = y_test[test_mask] - 1
+        log.info(
+            "No-hold mode | filtered train=%d val=%d test=%d",
+            len(x_train),
+            len(x_val),
+            len(x_test),
+        )
 
     loss_mode = resolve_loss_mode(architecture, args.loss_mode)
     export_model: nn.Module | None = None
@@ -1981,7 +2408,7 @@ def main() -> None:
                 training_model = MiniRocketMultiAttentionHead(
                     num_tokens=train_inputs.shape[1],
                     token_dim=train_inputs.shape[2],
-                    n_classes=len(LABEL_NAMES),
+                    n_classes=len(active_label_names),
                     model_dim=args.attention_dim,
                     num_heads=args.attention_heads,
                     num_layers=args.attention_layers,
@@ -2014,7 +2441,7 @@ def main() -> None:
                 val_inputs = ((val_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
                 test_inputs = ((test_inputs - feature_mean) / feature_std).astype(np.float32, copy=False)
 
-                training_model = nn.Linear(train_inputs.shape[1], len(LABEL_NAMES)).to(device)
+                training_model = nn.Linear(train_inputs.shape[1], len(active_label_names)).to(device)
                 model_backend = "minirocket-multivariate"
 
             optimizer = torch.optim.AdamW(training_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
@@ -2044,7 +2471,17 @@ def main() -> None:
                 shuffle=False,
             )
         else:
-            if architecture in {"ela", "fusion_lstm", "bilstm", "gru", "tcn", "tla", "legacy_lstm_attention"}:
+            if architecture in {
+                "ela",
+                "fusion_lstm",
+                "bilstm",
+                "gru",
+                "tcn",
+                "tla",
+                "legacy_lstm_attention",
+                "gold_legacy",
+                "gold_new",
+            }:
                 learning_rate = args.lr if args.lr > 0.0 else DEFAULT_SEQUENCE_LR
                 weight_decay = args.weight_decay if args.weight_decay >= 0.0 else DEFAULT_SEQUENCE_WEIGHT_DECAY
                 if architecture == "legacy_lstm_attention":
@@ -2052,6 +2489,22 @@ def main() -> None:
                         n_features=feature_count,
                         attention_heads=args.attention_heads,
                         attention_dropout=args.attention_dropout,
+                    ).to(device)
+                elif architecture == "gold_legacy":
+                    training_model = GoldLegacyLSTMAttentionClassifier(
+                        n_features=feature_count,
+                        attention_heads=args.attention_heads,
+                        attention_dropout=args.attention_dropout,
+                    ).to(device)
+                elif architecture == "gold_new":
+                    training_model = GoldNewTemporalClassifier(
+                        n_features=feature_count,
+                        channels=max(16, min(64, args.sequence_hidden_size)),
+                        hidden=max(32, min(64, args.sequence_hidden_size)),
+                        dense_hidden=max(64, feature_count * 2),
+                        attention_heads=args.attention_heads,
+                        attention_dropout=args.attention_dropout,
+                        dropout=args.sequence_dropout,
                     ).to(device)
                 elif architecture == "fusion_lstm":
                     training_model = FusionLSTMClassifier(
@@ -2222,7 +2675,7 @@ def main() -> None:
             if use_multihead_attention:
                 export_model = MiniRocketClassifier(
                     parameters=minirocket_parameters,
-                    n_classes=len(LABEL_NAMES),
+                    n_classes=len(active_label_names),
                     token_mean=token_mean,
                     token_std=token_std,
                     head_type="multiattention",
@@ -2236,7 +2689,7 @@ def main() -> None:
                     parameters=minirocket_parameters,
                     feature_mean=feature_mean,
                     feature_std=feature_std,
-                    n_classes=len(LABEL_NAMES),
+                    n_classes=len(active_label_names),
                     head_type="linear",
                 )
             export_model.head.load_state_dict(training_model.state_dict())
@@ -2318,6 +2771,7 @@ def main() -> None:
             feature_columns=feature_columns,
             feature_profile=feature_profile,
             use_extended_features=use_extended_features,
+            use_fixed_tick_bars=use_fixed_tick_bars,
         )
         + "\n"
     )
@@ -2362,6 +2816,8 @@ def main() -> None:
         feature_profile=feature_profile,
         point_size=point_size,
         fixed_move_price=fixed_move_price,
+        use_fixed_tick_bars=use_fixed_tick_bars,
+        tick_density=args.primary_tick_density,
     )
     if not archive_only:
         sync_directory_contents(model_diagnostics_dir, ACTIVE_DIAGNOSTICS_DIR)

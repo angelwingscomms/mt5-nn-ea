@@ -273,6 +273,56 @@ class FusionLSTMClassifier(nn.Module):
         return self.classifier(pooled)
 
 
+class GoldLegacyLSTMAttentionClassifier(nn.Module):
+    def __init__(
+        self,
+        n_features: int,
+        dense_hidden: int = 20,
+        n_classes: int = 3,
+        attention_heads: int = 4,
+        attention_dropout: float = 0.0,
+    ):
+        super().__init__()
+        if n_features <= 0:
+            raise ValueError("GoldLegacyLSTMAttentionClassifier requires n_features > 0.")
+        if dense_hidden <= 0:
+            raise ValueError("GoldLegacyLSTMAttentionClassifier requires dense_hidden > 0.")
+
+        self.n_features = int(n_features)
+        self.backend_name = "gold-legacy-lstm-attention"
+        self.recurrent_cell = MishLSTMCell(input_size=self.n_features, hidden_size=self.n_features)
+        self.attention = ProjectedMultiHeadSelfAttention(
+            input_dim=self.n_features,
+            num_heads=attention_heads,
+            head_dim=self.n_features,
+            dropout=attention_dropout,
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(self.n_features, dense_hidden),
+            nn.Mish(),
+            nn.Linear(dense_hidden, n_classes),
+        )
+
+    def encode_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError("GoldLegacyLSTMAttentionClassifier expects [batch, seq_len, channels] input.")
+
+        batch_size, seq_len, _channels = x.shape
+        hidden_state = x.new_zeros(batch_size, self.n_features)
+        cell_state = x.new_zeros(batch_size, self.n_features)
+        outputs = []
+        for timestep in range(seq_len):
+            hidden_state, cell_state = self.recurrent_cell(x[:, timestep, :], (hidden_state, cell_state))
+            outputs.append(hidden_state)
+        return torch.stack(outputs, dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        encoded = self.encode_sequence(x)
+        attended = self.attention(encoded)
+        pooled = (encoded + attended).mean(dim=1)
+        return self.classifier(pooled)
+
+
 class CausalConv1d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int, dilation: int = 1, bias: bool = True):
         super().__init__()
@@ -629,9 +679,109 @@ class TemporalLSTMAttentionClassifier(nn.Module):
         return self.head(encoded)
 
 
+class TemporalAttentionPooling(nn.Module):
+    def __init__(self, input_dim: int):
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("TemporalAttentionPooling requires input_dim > 0.")
+        self.score = nn.Linear(int(input_dim), 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError("TemporalAttentionPooling expects [batch, seq_len, channels] input.")
+
+        weights = torch.softmax(self.score(x).squeeze(-1), dim=1)
+        return torch.sum(x * weights.unsqueeze(-1), dim=1)
+
+
+class GoldNewTemporalClassifier(nn.Module):
+    def __init__(
+        self,
+        n_features: int,
+        channels: int = 64,
+        hidden: int = 64,
+        dense_hidden: int = 96,
+        n_classes: int = 3,
+        attention_heads: int = 4,
+        attention_dropout: float = 0.1,
+        dropout: float = 0.1,
+        kernel_size: int = 3,
+    ):
+        super().__init__()
+        if n_features <= 0:
+            raise ValueError("GoldNewTemporalClassifier requires n_features > 0.")
+        if channels <= 0:
+            raise ValueError("GoldNewTemporalClassifier requires channels > 0.")
+        if hidden <= 0:
+            raise ValueError("GoldNewTemporalClassifier requires hidden > 0.")
+        if dense_hidden <= 0:
+            raise ValueError("GoldNewTemporalClassifier requires dense_hidden > 0.")
+        if kernel_size <= 1:
+            raise ValueError("GoldNewTemporalClassifier requires kernel_size > 1.")
+
+        self.backend_name = "gold-new-conv-gru-attention"
+        self.sequence_norm = SequenceInstanceNorm(n_features)
+        self.conv_in = CausalConv1d(
+            in_channels=n_features,
+            out_channels=channels,
+            kernel_size=kernel_size,
+        )
+        self.conv_mid = CausalConv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+        )
+        self.conv_residual = nn.Linear(n_features, channels) if channels != n_features else nn.Identity()
+        self.conv_norm = nn.LayerNorm(channels)
+        self.conv_dropout = nn.Dropout(dropout)
+        self.recurrent = nn.GRU(
+            input_size=channels,
+            hidden_size=hidden,
+            num_layers=1,
+            batch_first=True,
+        )
+        self.recurrent_norm = nn.LayerNorm(hidden)
+        self.attention = SequenceAttentionBlock(
+            model_dim=hidden,
+            num_heads=attention_heads,
+            dropout=attention_dropout,
+        )
+        self.pool = TemporalAttentionPooling(hidden)
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(hidden * 2),
+            nn.Linear(hidden * 2, dense_hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dense_hidden, n_classes),
+        )
+
+    def encode_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError("GoldNewTemporalClassifier expects [batch, seq_len, channels] input.")
+
+        residual = self.conv_residual(self.sequence_norm(x))
+        x = self.conv_in(self.sequence_norm(x))
+        x = F.gelu(x)
+        x = self.conv_dropout(x)
+        x = self.conv_mid(x)
+        x = self.conv_dropout(F.gelu(x))
+        x = self.conv_norm(x + residual)
+        x, _state = self.recurrent(x)
+        x = self.recurrent_norm(x)
+        return self.attention(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        encoded = self.encode_sequence(x)
+        pooled = self.pool(encoded)
+        last_state = encoded[:, -1, :]
+        return self.classifier(torch.cat([last_state, pooled], dim=1))
+
+
 __all__ = [
     "CausalConv1d",
     "FusionLSTMClassifier",
+    "GoldLegacyLSTMAttentionClassifier",
+    "GoldNewTemporalClassifier",
     "LegacyLSTMAttentionClassifier",
     "LegacySequenceSelfAttention",
     "MishLSTMCell",
@@ -640,6 +790,7 @@ __all__ = [
     "SequenceAttentionBlock",
     "SequenceInstanceNorm",
     "SequenceMultiAttentionHead",
+    "TemporalAttentionPooling",
     "TCNClassifier",
     "TemporalConvBlock",
     "TemporalLSTMAttentionClassifier",

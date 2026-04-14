@@ -46,6 +46,7 @@
 #define DEFAULT_LOT_SIZE 0.54
 #define DEFAULT_RISK_PERCENT 0.00
 #define DEFAULT_LOT_MIN 0.54
+#define PRIMARY_TICK_DENSITY 27
 
 // Trainer window usage: 1 = use every eligible window in each split, 0 = obey the max_* caps below.
 #define USE_ALL_WINDOWS 0

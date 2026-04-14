@@ -31,6 +31,8 @@
 
 // Fixed-time bars are optional and only used when nn.py runs with -i.
 #define PRIMARY_BAR_SECONDS 9
+// Fixed-tick bars are optional and only used when nn.py runs with --use-fixed-tick-bars or -gold.
+#define PRIMARY_TICK_DENSITY 27
 
 // Fixed stop/target distance in symbol points, used when the trainer runs with -r
 // and when live.mq5 input R is true.

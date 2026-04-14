@@ -169,7 +169,13 @@ def main() -> None:
     sl_values = parse_float_list(args.sl_values)
     tp_values = parse_float_list(args.tp_values)
 
-    bars = nn.build_market_bars(Path("market_ticks.csv"), use_fixed_time_bars=bool(args.use_fixed_time_bars))
+    bars = nn.build_market_bars(
+        Path("market_ticks.csv"),
+        use_fixed_time_bars=bool(args.use_fixed_time_bars),
+        use_fixed_tick_bars=False,
+        tick_density=nn.DEFAULT_PRIMARY_TICK_DENSITY,
+        max_bars=0,
+    )
     x_all = nn.compute_features(bars)
     x = x_all[nn.WARMUP_BARS :]
     n_rows = len(x)

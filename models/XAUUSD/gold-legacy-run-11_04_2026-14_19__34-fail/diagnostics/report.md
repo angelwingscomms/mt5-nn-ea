@@ -78,14 +78,14 @@
 - trade_coverage: 0.0000
 - selected_trade_precision: n/a
 - selected_trade_mean_confidence: n/a
-- mean_confidence_all_predictions: 0.3943
+- mean_confidence_all_predictions: 0.3868
 
 ## Holdout
 - selected_trades: 0
 - trade_coverage: 0.0000
 - selected_trade_precision: n/a
 - selected_trade_mean_confidence: n/a
-- mean_confidence_all_predictions: 0.4268
+- mean_confidence_all_predictions: 0.4041
 
 ## Files
 - bars.csv
