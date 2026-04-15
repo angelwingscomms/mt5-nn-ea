@@ -1787,8 +1787,20 @@ def write_diagnostics(
     test_predictions.to_csv(diagnostics_dir / "holdout_predictions.csv", index=False)
     val_confusion.to_csv(diagnostics_dir / "validation_confusion_matrix.csv")
     test_confusion.to_csv(diagnostics_dir / "holdout_confusion_matrix.csv")
+    config_text = CURRENT_SHARED_CONFIG_PATH.read_text(encoding="utf-8")
+    lines = config_text.splitlines()
+    header_lines = []
+    variable_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#define"):
+            variable_lines.append(line)
+        else:
+            header_lines.append(line)
+    variable_lines.sort(key=lambda l: l.split()[1] if len(l.split()) > 1 else "")
+    all_lines = header_lines + variable_lines
     (diagnostics_dir / "shared_config_snapshot.mqh").write_text(
-        CURRENT_SHARED_CONFIG_PATH.read_text(encoding="utf-8"),
+        "\n".join(all_lines) + "\n",
         encoding="utf-8",
     )
     (diagnostics_dir / "model_config_snapshot.mqh").write_text(model_config_text, encoding="utf-8")
