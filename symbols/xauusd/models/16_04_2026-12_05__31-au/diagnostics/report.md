@@ -2,9 +2,9 @@
 
 ## Run
 - symbol: XAUUSD
-- backend: gold-new-conv-gru-attention
-- feature_profile: full
-- feature_count: 48
+- backend: gold-legacy-lstm-attention
+- feature_profile: minimal
+- feature_count: 9
 - loss_mode: cross-entropy
 - focal_gamma: 2.00
 
@@ -17,7 +17,7 @@
 - target_atr_period: 9
 - rv_period: 9
 - return_period: 9
-- warmup_bars: 28
+- warmup_bars: 9
 - label_risk_mode: FIXED
 - point_size: 0.00100000
 - fixed_move_points: 1440.00
@@ -27,10 +27,10 @@
 - execution_sl_multiplier: 5.40
 - execution_tp_multiplier: 5.40
 - use_all_windows: 0
-- selected_primary_confidence: 0.5000
-- deployed_primary_confidence: 0.5000
-- quality_gate_passed: 0
-- quality_gate_reason: validation selected-trade precision 0.4973 < required 0.5000
+- selected_primary_confidence: 0.5400
+- deployed_primary_confidence: 0.5400
+- quality_gate_passed: 1
+- quality_gate_reason: -
 
 ## Bar Stats
 - bars: 476292
@@ -49,43 +49,43 @@
 
 ## Label Counts
 - full bars:
-  - HOLD: 283273
-  - BUY: 96791
-  - SELL: 96200
+  - HOLD: 283275
+  - BUY: 96797
+  - SELL: 96211
 - train windows:
-  - HOLD: 29066
-  - BUY: 28761
+  - HOLD: 2927
+  - BUY: 2861
   - SELL: 0
 - validation windows:
-  - HOLD: 3356
-  - BUY: 3238
+  - HOLD: 325
+  - BUY: 320
   - SELL: 0
 - holdout windows:
-  - HOLD: 2722
-  - BUY: 2719
+  - HOLD: 266
+  - BUY: 254
   - SELL: 0
 
 ## Window Usage
-- train_available: 333373
-- train_used: 144000
-- validation_available: 71420
-- validation_used: 14400
-- holdout_available: 71420
-- holdout_used: 14400
+- train_available: 333387
+- train_used: 14400
+- validation_available: 71422
+- validation_used: 1440
+- holdout_available: 71423
+- holdout_used: 1440
 
 ## Validation
-- selected_trades: 941
-- trade_coverage: 0.1427
-- selected_trade_precision: 0.4973
-- selected_trade_mean_confidence: 0.5054
-- mean_confidence_all_predictions: 0.5083
+- selected_trades: 12
+- trade_coverage: 0.0186
+- selected_trade_precision: 0.6667
+- selected_trade_mean_confidence: 0.5592
+- mean_confidence_all_predictions: 0.5109
 
 ## Holdout
-- selected_trades: 771
-- trade_coverage: 0.1417
-- selected_trade_precision: 0.5110
-- selected_trade_mean_confidence: 0.5053
-- mean_confidence_all_predictions: 0.5083
+- selected_trades: 8
+- trade_coverage: 0.0154
+- selected_trade_precision: 0.1250
+- selected_trade_mean_confidence: 0.5590
+- mean_confidence_all_predictions: 0.5116
 
 ## Files
 - bars.csv

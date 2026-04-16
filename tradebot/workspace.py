@@ -251,7 +251,10 @@ def _max_model_dir_name_length(symbol: str) -> int:
 def _resource_literal_for_relative_model_dir(relative_model_dir: Path) -> str:
     """Return a `#resource` path that obeys the MQL5 path rules."""
 
-    literal = "\\\\".join((*relative_model_dir.parts, MODEL_FILE_NAME))
+    literal = relative_model_dir.parts[0]
+    for part in relative_model_dir.parts[1:]:
+        literal += "\\\\" + part
+    literal += "\\\\" + MODEL_FILE_NAME
     if len(literal) > RESOURCE_PATH_MAX_CHARS:
         raise ValueError(
             "The ONNX resource path is too long for MQL5. "

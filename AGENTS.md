@@ -1,6 +1,10 @@
 be minimalist
-always explain stuff to me like i'm 9 years old
+always speak in an extremely concise manner to the user and always explain stuff to the user like i'm 9 years old
 code like an expert deep learning engineer with decades of experience and an uncompromisable standard of extreme perfection
+
+before ever doing anything or attending to any request or user message, run this:
+`git add .; git commit -m"before codex"; git push"
+don't worry if push fails, it's the commit that's important
 
 # Agent Guide
 

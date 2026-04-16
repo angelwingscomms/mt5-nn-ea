@@ -1,9 +1,9 @@
 #include <Trade\Trade.mqh>
 // @active-model-reference begin
 #define ACTIVE_MODEL_SYMBOL "XAUUSD"
-#define ACTIVE_MODEL_VERSION "16_04_2026-09_42__55-xau-default-fail"
-#include "symbols/xauusd/models/16_04_2026-09_42__55-xau-default-fail/config.mqh"
-#resource "symbols/xauusd/models/16_04_2026-09_42__55-xau-default-fail/model.onnx" as uchar model_buffer[]
+#define ACTIVE_MODEL_VERSION "16_04_2026-12_53__03-au"
+#include "symbols/xauusd/models/16_04_2026-12_53__03-au/config.mqh"
+#resource "symbols\xauusd\models\16_04_2026-12_53__03-au\model.onnx" as uchar model_buffer[]
 // @active-model-reference end
 
 #ifndef MODEL_USE_ATR_RISK
@@ -252,13 +252,20 @@ void DebugPrint(string message) {
 }
 
 string SignalName(int signal) {
-   if(signal == 1) {
-      return "BUY";
-   }
-   if(signal == 2) {
+   #ifdef USE_NO_HOLD
+      if(signal == 0) {
+         return "BUY";
+      }
       return "SELL";
-   }
-   return "HOLD";
+   #else
+      if(signal == 1) {
+         return "BUY";
+      }
+      if(signal == 2) {
+         return "SELL";
+      }
+      return "HOLD";
+   #endif
 }
 
 ulong BarBucket(ulong time_msc) {
@@ -1138,14 +1145,24 @@ void ExtractFeatures(int h, float &features[]) {
 }
 
 void Softmax(const float &logits[], float &probs[]) {
-   double max_logit = MathMax(logits[0], MathMax(logits[1], logits[2]));
-   double e0 = MathExp(logits[0] - max_logit);
-   double e1 = MathExp(logits[1] - max_logit);
-   double e2 = MathExp(logits[2] - max_logit);
-   double sum = e0 + e1 + e2;
-   probs[0] = (float)(e0 / sum);
-   probs[1] = (float)(e1 / sum);
-   probs[2] = (float)(e2 / sum);
+   #ifdef USE_NO_HOLD
+      double max_logit = MathMax(logits[0], logits[1]);
+      double e0 = MathExp(logits[0] - max_logit);
+      double e1 = MathExp(logits[1] - max_logit);
+      double sum = e0 + e1;
+      probs[0] = (float)(e0 / sum);
+      probs[1] = (float)(e1 / sum);
+      DebugPrint(StringFormat("binary-softmax e0=%.4f e1=%.4f sum=%.4f probs=[%.4f, %.4f]", e0, e1, sum, probs[0], probs[1]));
+   #else
+      double max_logit = MathMax(logits[0], MathMax(logits[1], logits[2]));
+      double e0 = MathExp(logits[0] - max_logit);
+      double e1 = MathExp(logits[1] - max_logit);
+      double e2 = MathExp(logits[2] - max_logit);
+      double sum = e0 + e1 + e2;
+      probs[0] = (float)(e0 / sum);
+      probs[1] = (float)(e1 / sum);
+      probs[2] = (float)(e2 / sum);
+   #endif
 }
 
 void Predict() {
@@ -1165,24 +1182,50 @@ void Predict() {
       return;
    }
 
-   float probs[3];
+   #ifdef USE_NO_HOLD
+      float probs[2];
+   #else
+      float probs[3];
+   #endif
+   #ifdef USE_NO_HOLD
+      DebugPrint("binary-mode USE_NO_HOLD=true");
+   #else
+      DebugPrint("ternary-mode USE_NO_HOLD=false");
+   #endif
    Softmax(output_data, probs);
    int signal = ArrayMaximum(probs);
-   DebugPrint(
-      StringFormat(
-         "predict probs=[%.4f, %.4f, %.4f] signal=%s conf=%.4f",
-         probs[0],
-         probs[1],
-         probs[2],
-         SignalName(signal),
-         probs[signal]
-      )
-   );
-   if(signal <= 0) {
-      hold_skip_count++;
-      DebugPrint("skip trade: model chose HOLD");
-      return;
-   }
+   #ifdef USE_NO_HOLD
+      DebugPrint(
+         StringFormat(
+            "predict probs=[%.4f, %.4f] signal=%s conf=%.4f",
+            probs[0],
+            probs[1],
+            SignalName(signal),
+            probs[signal]
+         )
+      );
+      if(signal < 0 || signal > 1) {
+         DebugPrint(StringFormat("ERROR: invalid binary signal %d", signal));
+         hold_skip_count++;
+         return;
+      }
+   #else
+      DebugPrint(
+         StringFormat(
+            "predict probs=[%.4f, %.4f, %.4f] signal=%s conf=%.4f",
+            probs[0],
+            probs[1],
+            probs[2],
+            SignalName(signal),
+            probs[signal]
+         )
+      );
+      if(signal <= 0) {
+         hold_skip_count++;
+         DebugPrint("skip trade: model chose HOLD");
+         return;
+      }
+   #endif
    if(probs[signal] < PRIMARY_CONFIDENCE) {
       confidence_skip_count++;
       DebugPrint(
