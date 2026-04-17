@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from mt5_runtime import (
+from tradebot.root_modules.mt5_runtime import (
     PROJECT_DIR_NAME,
     build_metaeditor_compile_command,
     build_terminal_command,

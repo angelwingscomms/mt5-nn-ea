@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from mt5_runtime import (
+from tradebot.root_modules.mt5_runtime import (
     DEFAULT_WINDOWS_METAEDITOR_PATH,
     Mt5RuntimePaths,
     PROJECT_DIR_NAME,

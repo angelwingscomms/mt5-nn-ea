@@ -8,7 +8,7 @@ This repo trains MT5-compatible ONNX models from `config.mqh` and archives them 
 - `symbols/<symbol>/config/` stores reusable presets.
 - `symbols/<symbol>/models/<date>-<name>/` stores `model.onnx`, the combined `config.mqh`, diagnostics, and tests.
 - `live.mq5` points directly at one archived model folder.
-- Root helper scripts such as `inspect_bars.py`, `copy_ticks.py`, and `move_ticks.py` are thin wrappers; their implementations live under `tradebot/root_modules/`.
+- Only CLI helper scripts remain in the repo root. Importable Python modules now live under `tradebot/`, with CLI implementations under `tradebot/root_modules/`.
 
 ## Gold Presets
 

@@ -6,5 +6,5 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mamba_lite import CausalDepthwiseConv1d, RMSNorm
-from sequence_models import SequenceInstanceNorm, SequenceMultiAttentionHead
+from tradebot.models.sequence import SequenceInstanceNorm, SequenceMultiAttentionHead
+from tradebot.root_modules.mamba_lite import CausalDepthwiseConv1d, RMSNorm

@@ -8,5 +8,5 @@ import numpy as np
 import torch
 from torch import nn as torch_nn
 
-import nn
-from minirocket_classifier import fit_minirocket, transform_sequences
+import tradebot.training as nn
+from tradebot.root_modules.minirocket_classifier import fit_minirocket, transform_sequences

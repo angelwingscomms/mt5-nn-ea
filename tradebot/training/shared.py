@@ -23,22 +23,7 @@ try:
 except ModuleNotFoundError:
     from .tqdm_fallback import tqdm
 
-from chronos_backend import (
-    CHRONOS_BOLT_MODEL_IDS,
-    DEFAULT_CHRONOS_BOLT_MODEL_ID,
-    load_chronos_bolt_barrier_model,
-)
-from castor_lite import CastorClassifier
-from mamba_lite import MambaLiteClassifier
-from minirocket_classifier import (
-    MiniRocketClassifier,
-    MiniRocketMultiAttentionHead,
-    fit_minirocket,
-    transform_sequences,
-    transform_sequence_tokens,
-)
-from mt5_runtime import resolve_mt5_runtime
-from sequence_models import (
+from tradebot.models.sequence import (
     AuLSTMMultiheadAttentionClassifier,
     FusionLSTMClassifier,
     GoldLegacyLSTMAttentionClassifier,
@@ -48,6 +33,21 @@ from sequence_models import (
     TCNClassifier,
     TemporalLSTMAttentionClassifier,
 )
+from tradebot.root_modules.castor_lite import CastorClassifier
+from tradebot.root_modules.chronos_backend import (
+    CHRONOS_BOLT_MODEL_IDS,
+    DEFAULT_CHRONOS_BOLT_MODEL_ID,
+    load_chronos_bolt_barrier_model,
+)
+from tradebot.root_modules.mamba_lite import MambaLiteClassifier
+from tradebot.root_modules.minirocket_classifier import (
+    MiniRocketClassifier,
+    MiniRocketMultiAttentionHead,
+    fit_minirocket,
+    transform_sequences,
+    transform_sequence_tokens,
+)
+from tradebot.root_modules.mt5_runtime import resolve_mt5_runtime
 from tradebot.config_io import load_define_file, read_text_best_effort, render_define_value
 from tradebot.pipeline.diagnostics import DiagnosticsConfig, write_diagnostics as write_diagnostics_report
 from tradebot.pipeline.feature_builder import FeatureEngineeringConfig, compute_features as build_feature_array

@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from mt5_runtime import PROJECT_DIR_NAME, iter_agent_log_paths, launch_terminal as launch_mt5_terminal, resolve_mt5_runtime
+from tradebot.root_modules.mt5_runtime import (
+    PROJECT_DIR_NAME,
+    iter_agent_log_paths,
+    launch_terminal as launch_mt5_terminal,
+    resolve_mt5_runtime,
+)
 from tradebot.config_io import load_define_file, read_text_best_effort, sanitize_symbol
 from tradebot.workspace import (
     ACTIVE_DIAGNOSTICS_DIR,

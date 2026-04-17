@@ -7,7 +7,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
-from sequence_models import (
+from tradebot.models.sequence import (
     SequenceInstanceNorm,
     SequenceMultiAttentionHead,
 )

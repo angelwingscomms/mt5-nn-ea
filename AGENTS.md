@@ -26,7 +26,7 @@ This repo is a self-contained MT5 + Python pipeline.
 - `live.mq5` function bodies now live in `live/functions/` includes.
 - `probe_live_extract_stub.mq5` function bodies now live in `probes/probe_live_extract_stub_functions/` includes.
 - `sequence_models.py` is now just a small compatibility wrapper.
-- Old module entry files like `nn.py`, `tradebot/workspace.py`, `inspect_bars.py`, `copy_ticks.py`, and similar Python files are now thin compatibility wrappers that forward to the split packages.
+- Only user-facing CLI entry files like `nn.py`, `inspect_bars.py`, and similar helpers remain in the repo root. Importable Python modules live under `tradebot/`.
 
 ## Gold Profiles
 
