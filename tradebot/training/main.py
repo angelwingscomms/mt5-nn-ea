@@ -1,12 +1,36 @@
 from __future__ import annotations
 
 from .shared import *  # noqa: F401,F403
+import tradebot.training.shared as _shared
 
 def main() -> None:
     t0 = time.time()
     args = parse_args()
     project = args.config_project
     apply_shared_settings(project.values, project=project, shared_config_path=project.config_path)
+    # Update module globals from shared module after apply_shared_settings ran
+    _keys = [
+        "SHARED", "SEQ_LEN", "TARGET_HORIZON", "FEATURE_ATR_PERIOD",
+        "FEATURE_ATR_RATIO_PERIOD", "FEATURE_BOLLINGER_PERIOD", "FEATURE_DONCHIAN_FAST_PERIOD",
+        "FEATURE_DONCHIAN_SLOW_PERIOD", "FEATURE_RET_2_PERIOD", "FEATURE_RET_3_PERIOD",
+        "FEATURE_RET_6_PERIOD", "FEATURE_RET_12_PERIOD", "FEATURE_RET_20_PERIOD",
+        "FEATURE_RSI_FAST_PERIOD", "FEATURE_RSI_SLOW_PERIOD", "FEATURE_RV_LONG_PERIOD",
+        "FEATURE_SMA_FAST_PERIOD", "FEATURE_SMA_MID_PERIOD", "FEATURE_SMA_SLOW_PERIOD",
+        "FEATURE_SMA_SLOPE_SHIFT", "FEATURE_SMA_TREND_FAST_PERIOD",
+        "FEATURE_SPREAD_Z_PERIOD", "FEATURE_STOCH_PERIOD", "FEATURE_STOCH_SMOOTH_PERIOD",
+        "FEATURE_TICK_COUNT_PERIOD", "FEATURE_TICK_IMBALANCE_FAST_PERIOD",
+        "FEATURE_TICK_IMBALANCE_SLOW_PERIOD", "TARGET_ATR_PERIOD", "RV_PERIOD",
+        "RETURN_PERIOD", "MAX_FEATURE_LOOKBACK", "WARMUP_BARS",
+        "IMBALANCE_MIN_TICKS", "IMBALANCE_EMA_SPAN", "USE_IMBALANCE_EMA_THRESHOLD",
+        "USE_IMBALANCE_MIN_TICKS_DIV3_THRESHOLD", "PRIMARY_BAR_SECONDS",
+        "PRIMARY_TICK_DENSITY", "BAR_DURATION_MS", "DEFAULT_FIXED_MOVE",
+        "LABEL_SL_MULTIPLIER", "LABEL_TP_MULTIPLIER", "EXECUTION_SL_MULTIPLIER",
+        "EXECUTION_TP_MULTIPLIER", "USE_ALL_WINDOWS", "DEFAULT_EPOCHS",
+        "DEFAULT_BATCH_SIZE", "DEFAULT_MAX_TRAIN_WINDOWS", "DEFAULT_MAX_EVAL_WINDOWS",
+        "DEFAULT_PATIENCE", "DEFAULT_LOSS_MODE", "ACTIVE_PROJECT",
+    ]
+    for _k in _keys:
+        globals()[_k] = getattr(_shared, _k)
     torch.manual_seed(42)
     np.random.seed(42)
     architecture = resolve_architecture(args)
@@ -108,11 +132,11 @@ def main() -> None:
         args.chronos_patch_aligned_context or args.chronos_auto_context or args.chronos_ensemble_contexts
     ):
         log.warning("Chronos context switches are ignored unless MODEL_ARCHITECTURE is chronos_bolt.")
-    if use_fixed_time_bars and PRIMARY_BAR_SECONDS <= 0:
+    if use_fixed_time_bars and _shared.PRIMARY_BAR_SECONDS <= 0:
         raise ValueError("PRIMARY_BAR_SECONDS must be positive.")
     if use_fixed_tick_bars and args.primary_tick_density <= 0:
         raise ValueError("PRIMARY_TICK_DENSITY must be positive.")
-    if DEFAULT_FIXED_MOVE <= 0.0:
+    if _shared.DEFAULT_FIXED_MOVE <= 0.0:
         raise ValueError("DEFAULT_FIXED_MOVE must be positive in points.")
 
     data_path = resolve_local_path(args.data_file)
@@ -509,6 +533,7 @@ def main() -> None:
                         attention_heads=args.attention_heads,
                         attention_dropout=args.attention_dropout,
                         dropout=args.sequence_dropout,
+                        n_classes=len(active_label_names),
                     ).to(device)
                 elif architecture == "au":
                     training_model = AuLSTMMultiheadAttentionClassifier(
