@@ -6,6 +6,7 @@ def parse_args() -> argparse.Namespace:
     project = resolve_active_project_config(resolve_active_config_path())
     apply_shared_settings(project.values, project=project, shared_config_path=project.config_path)
     values = project.values
+    use_fixed_time_bars = bool(values.get("USE_FIXED_TIME_BARS", values.get("USE_SECOND_BARS", False)))
     use_custom_lr = bool(values.get("USE_CUSTOM_LEARNING_RATE", False))
     use_custom_weight_decay = bool(values.get("USE_CUSTOM_WEIGHT_DECAY", False))
     use_max_bars = bool(values.get("USE_MAX_BARS", False))
@@ -25,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         device=str(values.get("DEVICE", "cpu")).strip() or "cpu",
         focal_gamma=float(values.get("FOCAL_GAMMA", DEFAULT_FOCAL_GAMMA)),
         use_fixed_risk=bool(values.get("USE_FIXED_TARGETS", False)),
-        use_fixed_time_bars=bool(values.get("USE_SECOND_BARS", False)),
+        use_fixed_time_bars=use_fixed_time_bars,
         use_fixed_tick_bars=bool(values.get("USE_FIXED_TICK_BARS", False)),
         primary_tick_density=int(values.get("PRIMARY_TICK_DENSITY", DEFAULT_PRIMARY_TICK_DENSITY)),
         use_extended_features=not bool(values.get("USE_MINIMAL_FEATURE_SET", False)),

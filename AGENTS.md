@@ -26,7 +26,7 @@ This repo is a self-contained MT5 + Python pipeline.
 - `live.mq5` function bodies now live in `live/functions/` includes.
 - `probe_live_extract_stub.mq5` function bodies now live in `probes/probe_live_extract_stub_functions/` includes.
 - `sequence_models.py` is now just a small compatibility wrapper.
-- Old module entry files like `nn.py`, `tradebot/workspace.py`, and similar Python files are now thin compatibility wrappers that forward to the split packages.
+- Old module entry files like `nn.py`, `tradebot/workspace.py`, `inspect_bars.py`, `copy_ticks.py`, and similar Python files are now thin compatibility wrappers that forward to the split packages.
 
 ## Gold Profiles
 
@@ -44,6 +44,7 @@ This repo is a self-contained MT5 + Python pipeline.
 ## Config Rules
 
 - Prefer explicit booleans over magic zero values for enable/disable behavior.
+- Prefer `USE_FIXED_TIME_BARS` in configs, and keep the legacy `USE_SECOND_BARS` alias in sync until older readers are gone.
 - Full feature mode must always include the minimal feature set.
 - Never add `.onnx` files to `.gitignore`.
 - `USE_MAIN_FEATURE_SET` enables the 40-feature notebook-style main feature pack.

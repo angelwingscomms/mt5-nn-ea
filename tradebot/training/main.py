@@ -107,23 +107,29 @@ def main() -> None:
                 args.attention_layers,
             )
     if architecture == "au":
+        au_hidden_size = 64
+        au_sequence_layers = 1
+        au_attention_heads = 4
+        au_attention_layers = 1
+        au_sequence_dropout = 0.0
+        au_attention_dropout = 0.0
         if not use_multihead_attention:
             log.info("AU includes its attention block by design; enabling attention automatically.")
         use_multihead_attention = True
-        if args.sequence_hidden_size != DEFAULT_SEQUENCE_HIDDEN_SIZE:
+        if args.sequence_hidden_size != au_hidden_size:
             log.warning(
                 "AU fixes its LSTM width to 64; ignoring --sequence-hidden-size=%d.",
                 args.sequence_hidden_size,
             )
-        if args.sequence_layers != DEFAULT_SEQUENCE_LAYERS:
+        if args.sequence_layers != au_sequence_layers:
             log.warning("AU uses a single LSTM layer; ignoring --sequence-layers=%d.", args.sequence_layers)
-        if abs(args.sequence_dropout - DEFAULT_SEQUENCE_DROPOUT) > 1e-12:
+        if abs(args.sequence_dropout - au_sequence_dropout) > 1e-12:
             log.warning("AU does not use recurrent dropout; ignoring --sequence-dropout=%.3f.", args.sequence_dropout)
-        if args.attention_heads != DEFAULT_ATTENTION_HEADS:
+        if args.attention_heads != au_attention_heads:
             log.warning("AU fixes its attention heads to 4; ignoring --attention-heads=%d.", args.attention_heads)
-        if args.attention_layers != DEFAULT_ATTENTION_LAYERS:
+        if args.attention_layers != au_attention_layers:
             log.warning("AU uses one attention block; ignoring --attention-layers=%d.", args.attention_layers)
-        if abs(args.attention_dropout - DEFAULT_ATTENTION_DROPOUT) > 1e-12:
+        if abs(args.attention_dropout - au_attention_dropout) > 1e-12:
             log.warning("AU uses zero attention dropout; ignoring --attention-dropout=%.3f.", args.attention_dropout)
     if architecture == "chronos_bolt" and use_multihead_attention:
         log.warning("Chronos-Bolt backend ignores multihead-attention settings.")
