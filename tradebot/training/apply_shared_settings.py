@@ -61,6 +61,7 @@ def apply_shared_settings(
     global DEFAULT_MAX_TRAIN_WINDOWS
     global DEFAULT_MAX_EVAL_WINDOWS
     global DEFAULT_PATIENCE
+    global SEQUENCE_DROPOUT
     global DEFAULT_LOSS_MODE
 
     import tradebot.training.shared as _sm
@@ -120,4 +121,5 @@ def apply_shared_settings(
     _sm.DEFAULT_MAX_TRAIN_WINDOWS = int(_sm.SHARED["DEFAULT_MAX_TRAIN_WINDOWS"])
     _sm.DEFAULT_MAX_EVAL_WINDOWS = int(_sm.SHARED["DEFAULT_MAX_EVAL_WINDOWS"])
     _sm.DEFAULT_PATIENCE = int(_sm.SHARED["DEFAULT_PATIENCE"])
+    _sm.SEQUENCE_DROPOUT = float(_sm.SHARED["SEQUENCE_DROPOUT"])
     _sm.DEFAULT_LOSS_MODE = str(_sm.SHARED.get("DEFAULT_LOSS_MODE", "cross-entropy"))
