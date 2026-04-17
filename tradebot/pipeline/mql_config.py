@@ -7,11 +7,9 @@ from pathlib import Path
 import numpy as np
 
 from tradebot.config_io import render_define_value
-from tradebot.project_config import ResolvedProjectConfig, feature_macro_name
-
-
-def format_float_array(values: np.ndarray) -> str:
-    return ", ".join(f"{float(v):.8f}f" for v in values)
+from tradebot.project_config import ResolvedProjectConfig
+from common.features import feature_index_macro_name
+from tradebot.pipeline.format_float_array import format_float_array
 
 
 def build_mql_config(
@@ -94,7 +92,7 @@ def build_mql_config(
         f"#define MODEL_FEATURE_COUNT {len(feature_columns)}",
     ]
     for feature_index, feature_name in enumerate(feature_columns):
-        macro_name = feature_macro_name(feature_name)
+        macro_name = feature_index_macro_name(feature_name)
         feature_macro_lines.extend(
             [
                 f"#ifdef {macro_name}",

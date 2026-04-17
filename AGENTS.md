@@ -18,6 +18,7 @@ This repo is a self-contained MT5 + Python pipeline.
 - `live.mq5` includes the archived model folder directly.
 - Pipeline helpers live in `tradebot/pipeline/`.
 - Sequence architectures live in `tradebot/models/sequence/`.
+- Shared low-level helpers live in `common/`.
 - `sequence_models.py` is now just a small compatibility wrapper.
 
 ## Gold Profiles

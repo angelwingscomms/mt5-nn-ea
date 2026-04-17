@@ -1008,18 +1008,36 @@ void ExtractFeatures(int h, float &features[]) {
    Bar prev = history[h + 1];
    double close = bar.c;
 
+#ifdef FEATURE_IDX_RET1
    features[FEATURE_IDX_RET1] = ScaleAndClip((float)LogReturnAt(h), FEATURE_IDX_RET1);
+#endif
+#ifdef FEATURE_IDX_HIGH_REL_PREV
    features[FEATURE_IDX_HIGH_REL_PREV] = ScaleAndClip((float)SafeLogRatio(bar.h, prev.c), FEATURE_IDX_HIGH_REL_PREV);
+#endif
+#ifdef FEATURE_IDX_LOW_REL_PREV
    features[FEATURE_IDX_LOW_REL_PREV] = ScaleAndClip((float)SafeLogRatio(bar.l, prev.c), FEATURE_IDX_LOW_REL_PREV);
+#endif
+#ifdef FEATURE_IDX_SPREAD_REL
    features[FEATURE_IDX_SPREAD_REL] = ScaleAndClip((float)(bar.spread / (close + 1e-10)), FEATURE_IDX_SPREAD_REL);
+#endif
+#ifdef FEATURE_IDX_CLOSE_IN_RANGE
    features[FEATURE_IDX_CLOSE_IN_RANGE] = ScaleAndClip(
       (float)((close - bar.l) / (bar.h - bar.l + 1e-8)),
       FEATURE_IDX_CLOSE_IN_RANGE
    );
+#endif
+#ifdef FEATURE_IDX_ATR_REL
    features[FEATURE_IDX_ATR_REL] = ScaleAndClip((float)(bar.atr_feature / (close + 1e-10)), FEATURE_IDX_ATR_REL);
+#endif
+#ifdef FEATURE_IDX_RV
    features[FEATURE_IDX_RV] = ScaleAndClip((float)RollingStdReturn(h, RV_PERIOD), FEATURE_IDX_RV);
+#endif
+#ifdef FEATURE_IDX_RETURN_N
    features[FEATURE_IDX_RETURN_N] = ScaleAndClip((float)ReturnOverBars(h, RETURN_PERIOD), FEATURE_IDX_RETURN_N);
+#endif
+#ifdef FEATURE_IDX_TICK_IMBALANCE
    features[FEATURE_IDX_TICK_IMBALANCE] = ScaleAndClip((float)bar.tick_imbalance, FEATURE_IDX_TICK_IMBALANCE);
+#endif
 #ifdef FEATURE_IDX_RET_2
    features[FEATURE_IDX_RET_2] = ScaleAndClip((float)ReturnOverBars(h, FEATURE_RET_2_PERIOD), FEATURE_IDX_RET_2);
 #endif
@@ -1280,7 +1298,6 @@ void ExtractFeatures(int h, float &features[]) {
 #ifdef FEATURE_IDX_ATR_27
    features[FEATURE_IDX_ATR_27] = ScaleAndClip((float)SimpleAtr(h, FEATURE_MAIN_LONG_PERIOD), FEATURE_IDX_ATR_27);
 #endif
-#if defined(FEATURE_IDX_MACD_LINE) || defined(FEATURE_IDX_MACD_SIGNAL) || defined(FEATURE_IDX_MACD_HIST)
    {
       double macd_line = 0.0;
       double macd_signal = 0.0;
@@ -1296,7 +1313,6 @@ void ExtractFeatures(int h, float &features[]) {
          features[FEATURE_IDX_MACD_HIST] = ScaleAndClip((float)macd_hist, FEATURE_IDX_MACD_HIST);
       #endif
    }
-#endif
 #ifdef FEATURE_IDX_EMA_GAP_9
    features[FEATURE_IDX_EMA_GAP_9] = ScaleAndClip(
       (float)(EmaClose(h, FEATURE_MAIN_SHORT_PERIOD) - close),
@@ -1393,7 +1409,6 @@ void ExtractFeatures(int h, float &features[]) {
       FEATURE_IDX_BOLLINGER_WIDTH_27
    );
 #endif
-#if defined(FEATURE_IDX_HOUR_SIN) || defined(FEATURE_IDX_HOUR_COS) || defined(FEATURE_IDX_MINUTE_SIN) || defined(FEATURE_IDX_MINUTE_COS) || defined(FEATURE_IDX_DAY_OF_WEEK_SCALED)
    {
       MqlDateTime parts;
       TimeToStruct((datetime)(bar.time_open_msc / 1000ULL), parts);
@@ -1413,12 +1428,11 @@ void ExtractFeatures(int h, float &features[]) {
       #endif
       #ifdef FEATURE_IDX_DAY_OF_WEEK_SCALED
          features[FEATURE_IDX_DAY_OF_WEEK_SCALED] = ScaleAndClip(
-            (float)(parts.day_of_week / 6.0),
+            (float)(((parts.day_of_week + 1) % 7) / 6.0),
             FEATURE_IDX_DAY_OF_WEEK_SCALED
          );
       #endif
    }
-#endif
 }
 
 void Softmax(const float &logits[], float &probs[]) {
