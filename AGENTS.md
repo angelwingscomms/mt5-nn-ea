@@ -19,7 +19,12 @@ This repo is a self-contained MT5 + Python pipeline.
 - Pipeline helpers live in `tradebot/pipeline/`.
 - Sequence architectures live in `tradebot/models/sequence/`.
 - Shared low-level helpers live in `common/`.
+- Split training logic lives in `tradebot/training/`.
+- Split top-level Python modules live in `tradebot/root_modules/`.
+- `live.mq5` function bodies now live in `live/functions/` includes.
+- `probe_live_extract_stub.mq5` function bodies now live in `probes/probe_live_extract_stub_functions/` includes.
 - `sequence_models.py` is now just a small compatibility wrapper.
+- Old module entry files like `nn.py`, `tradebot/workspace.py`, and similar Python files are now thin compatibility wrappers that forward to the split packages.
 
 ## Gold Profiles
 
