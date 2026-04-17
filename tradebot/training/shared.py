@@ -30,6 +30,7 @@ from tradebot.models.sequence import (
     GoldNewTemporalClassifier,
     LegacyLSTMAttentionClassifier,
     RecurrentSequenceClassifier,
+    ScalperMicrostructureClassifier,
     TCNClassifier,
     TemporalLSTMAttentionClassifier,
 )

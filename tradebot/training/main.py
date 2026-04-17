@@ -512,6 +512,7 @@ def main() -> None:
                 "tcn",
                 "tla",
                 "au",
+                "i9",
                 "legacy_lstm_attention",
                 "gold_legacy",
                 "gold_new",
@@ -545,6 +546,17 @@ def main() -> None:
                     training_model = AuLSTMMultiheadAttentionClassifier(
                         n_features=feature_count,
                         n_classes=len(active_label_names),
+                    ).to(device)
+                elif architecture == "i9":
+                    training_model = ScalperMicrostructureClassifier(
+                        n_features=feature_count,
+                        channels=128,
+                        hidden=128,
+                        dense_hidden=64,
+                        n_classes=len(active_label_names),
+                        attention_heads=4,
+                        attention_dropout=args.attention_dropout,
+                        dropout=args.sequence_dropout,
                     ).to(device)
                 elif architecture == "fusion_lstm":
                     training_model = FusionLSTMClassifier(

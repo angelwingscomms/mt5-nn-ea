@@ -10,7 +10,7 @@
 
 ## Shared Config
 - seq_len: 36
-- target_horizon: 27
+- target_horizon: 9
 - bar_mode: IMBALANCE
 - imbalance_min_ticks: 9
 - imbalance_ema_span: 9
@@ -28,8 +28,8 @@
 - execution_sl_multiplier: 0.54
 - execution_tp_multiplier: 0.54
 - use_all_windows: 0
-- selected_primary_confidence: 0.5300
-- deployed_primary_confidence: 0.5300
+- selected_primary_confidence: 0.5500
+- deployed_primary_confidence: 0.5500
 - quality_gate_passed: 1
 - quality_gate_reason: -
 
@@ -50,39 +50,39 @@
 
 ## Label Counts
 - full bars:
-  - BUY: 31788
-  - SELL: 104799
+  - BUY: 37401
+  - SELL: 101987
 - train windows:
-  - BUY: 7842
-  - SELL: 7829
+  - BUY: 7511
+  - SELL: 7603
 - validation windows:
-  - BUY: 1277
-  - SELL: 1348
+  - BUY: 1261
+  - SELL: 1326
 - holdout windows:
-  - BUY: 1310
-  - SELL: 1286
+  - BUY: 1250
+  - SELL: 1266
 
 ## Window Usage
-- train_available: 169699
+- train_available: 169717
 - train_used: 18000
-- validation_available: 36279
+- validation_available: 36297
 - validation_used: 3000
-- holdout_available: 36280
+- holdout_available: 36298
 - holdout_used: 3000
 
 ## Validation
-- selected_trades: 19
-- trade_coverage: 0.0072
-- selected_trade_precision: 0.5789
-- selected_trade_mean_confidence: 0.5410
-- mean_confidence_all_predictions: 0.5096
+- selected_trades: 72
+- trade_coverage: 0.0278
+- selected_trade_precision: 0.5833
+- selected_trade_mean_confidence: 0.5597
+- mean_confidence_all_predictions: 0.5177
 
 ## Holdout
-- selected_trades: 12
-- trade_coverage: 0.0046
-- selected_trade_precision: 0.4167
-- selected_trade_mean_confidence: 0.5442
-- mean_confidence_all_predictions: 0.5097
+- selected_trades: 56
+- trade_coverage: 0.0223
+- selected_trade_precision: 0.4643
+- selected_trade_mean_confidence: 0.5611
+- mean_confidence_all_predictions: 0.5196
 
 ## Files
 - bars.csv
