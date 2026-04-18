@@ -1,0 +1,32 @@
+from __future__ import annotations
+
+from .shared import *  # noqa: F401,F403
+
+def resolve_feature_columns(values: dict[str, Scalar], architecture: str) -> tuple[str, ...]:
+    """Resolve the exact ordered feature list used for training and export."""
+
+    if architecture == "chronos_bolt":
+        return MINIMAL_FEATURE_COLUMNS
+
+    if bool(values.get("USE_MAIN_FEATURE_SET", False)):
+        return MAIN_FEATURE_COLUMNS
+
+    if bool(values.get("USE_MINIMAL_FEATURE_SET", False)):
+        selected = tuple(
+            feature_name
+            for feature_name in MINIMAL_FEATURE_COLUMNS
+            if _minimal_feature_enabled(values, feature_name)
+        )
+        if not selected:
+            raise ValueError("USE_MINIMAL_FEATURE_SET is true but no minimal features are enabled.")
+        return selected
+
+    selected = list(MINIMAL_FEATURE_COLUMNS)
+    if bool(values.get("USE_GOLD_CONTEXT", False)):
+        for feature_name in GOLD_CONTEXT_FEATURE_COLUMNS:
+            if _feature_enabled(values, feature_name):
+                selected.append(feature_name)
+    for feature_name in EXTRA_FEATURE_COLUMNS:
+        if _feature_enabled(values, feature_name):
+            selected.append(feature_name)
+    return tuple(selected)

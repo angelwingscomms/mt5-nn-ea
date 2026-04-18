@@ -1,10 +1,9 @@
 #include <Trade\Trade.mqh>
 // @active-model-reference begin
-#define ACTIVE_MODEL_SYMBOL "XAUUSD"
-#define ACTIVE_MODEL_VERSION "09_04_2026-19_12__32-fail"
-#include "models/XAUUSD/09_04_2026-19_12__32-fail/diagnostics/shared_config_snapshot.mqh"
-#include "models/XAUUSD/09_04_2026-19_12__32-fail/diagnostics/model_config_snapshot.mqh"
-#resource "models/XAUUSD/09_04_2026-19_12__32-fail\model.onnx" as uchar model_buffer[]
+#define ACTIVE_MODEL_SYMBOL "BTCUSD"
+#define ACTIVE_MODEL_VERSION "18_04_2026-03_39__59-bitco"
+#include "symbols/btcusd/models/18_04_2026-03_39__59-bitco/config.mqh"
+#resource "symbols\\btcusd\\models\\18_04_2026-03_39__59-bitco\\model.onnx" as uchar model_buffer[]
 // @active-model-reference end
 
 #ifndef MODEL_USE_ATR_RISK
@@ -13,6 +12,10 @@
 
 #ifndef MODEL_USE_FIXED_TIME_BARS
 #define MODEL_USE_FIXED_TIME_BARS 0
+#endif
+
+#ifndef MODEL_USE_FIXED_TICK_BARS
+#define MODEL_USE_FIXED_TICK_BARS 0
 #endif
 
 #define INPUT_BUFFER_SIZE (SEQ_LEN * MODEL_FEATURE_COUNT)
@@ -24,10 +27,16 @@ input double FIXED_MOVE = DEFAULT_FIXED_MOVE;
 input double SL_MULTIPLIER = DEFAULT_SL_MULTIPLIER;
 input double TP_MULTIPLIER = DEFAULT_TP_MULTIPLIER;
 input double LOT_SIZE = DEFAULT_LOT_SIZE;
+input double LOT_SIZE_CAP = DEFAULT_LOT_SIZE_CAP;
 input double RISK_PERCENT = DEFAULT_RISK_PERCENT;
-input double LOT_MIN = DEFAULT_LOT_MIN;
+input double BROKER_MIN_LOT_SIZE = DEFAULT_BROKER_MIN_LOT_SIZE;
+input bool USE_BROKER_MIN_LOT = USE_BROKER_MIN_LOT_SIZE;
+input bool USE_LOT_SIZE_CAP_INPUT = USE_LOT_SIZE_CAP;
+input bool USE_RISK_PERCENT_INPUT = USE_RISK_PERCENT;
 input int MAGIC_NUMBER = 777777;
 input bool DEBUG_LOG = true;
+input string USDX_SYMBOL = "$USDX";
+input string USDJPY_SYMBOL = "USDJPY";
 
 long onnx_handle = INVALID_HANDLE;
 CTrade trade;
@@ -38,10 +47,15 @@ struct Bar {
    double l;
    double c;
    double spread;
+   double spread_mean;
    double tick_imbalance;
+   int tick_count;
+   double usdx_bid;
+   double usdjpy_bid;
    double atr_feature;
    double atr_trade;
-   ulong time_msc;
+   ulong time_open_msc;
+   ulong time_close_msc;
    bool valid;
 };
 
@@ -52,8 +66,13 @@ bool bar_started = false;
 ulong current_bar_bucket = 0;
 ulong last_tick_time = 0;
 double tick_imbalance_sum = 0.0;
+double spread_sum = 0.0;
 double last_bid = 0.0;
 int last_sign = 1;
+bool usdx_available = false;
+bool usdjpy_available = false;
+double last_usdx_bid = 0.0;
+double last_usdjpy_bid = 0.0;
 double primary_expected_abs_theta = 60.0;
 int warmup_count = 0;
 double warmup_sum_feature = 0.0;
@@ -81,6 +100,7 @@ void StartImbalanceBar(MqlTick &tick);
 bool RollFixedTimeBarIfNeeded(ulong next_bar_bucket, int &closed_tick_count);
 void ProcessTick(MqlTick &tick, ulong bar_bucket);
 void UpdateIndicators(Bar &bar);
+double ResolveImbalanceThresholdBase();
 bool ShouldClosePrimaryBar(double &observed_abs_theta);
 void UpdatePrimaryImbalanceThreshold(double observed_abs_theta);
 void CloseBar();
@@ -90,6 +110,26 @@ double SafeLogRatio(double num, double den);
 double LogReturnAt(int h);
 double ReturnOverBars(int h, int bars);
 double RollingStdReturn(int h, int window);
+double MeanClose(int h, int window);
+double StdClose(int h, int window);
+double MaxHigh(int h, int window);
+double MinLow(int h, int window);
+double MeanTickCount(int h, int window);
+double StdTickCount(int h, int window);
+double MeanTickImbalance(int h, int window);
+double MeanSpreadRel(int h, int window);
+double StdSpreadRel(int h, int window);
+double MeanAtrFeature(int h, int window);
+double TrueRangeAt(int h);
+double SimpleAtr(int h, int period);
+double EmaClose(int h, int period);
+void MacdAt(int h, double &line, double &signal, double &hist);
+double TypicalPrice(int h);
+double SimpleCci(int h, int period);
+double WilliamsR(int h, int period);
+double SimpleRsi(int h, int period);
+double StochK(int h, int period);
+double StochD(int h, int period);
 void ExtractFeatures(int h, float &features[]);
 void Softmax(const float &logits[], float &probs[]);
 void Predict();
@@ -98,735 +138,65 @@ void DebugPrint(string message);
 string SignalName(int signal);
 double StopDistance();
 double TargetDistance();
+double ResolveMinimumVolume();
 double NormalizeVolume(double volume);
 double CalculateTradeVolume(int signal, double price, double sl);
 void PrintRunSummary();
-
-int OnInit() {
-   DebugPrint("Model reference: " + ACTIVE_MODEL_SYMBOL + "/" + ACTIVE_MODEL_VERSION);
-
-   onnx_handle = OnnxCreateFromBuffer(model_buffer, ONNX_DEFAULT);
-   if(onnx_handle == INVALID_HANDLE) {
-      Print("[FATAL] OnnxCreateFromBuffer failed: ", GetLastError());
-      return INIT_FAILED;
-   }
-
-   long input_shape[3];
-   long output_shape[2];
-   input_shape[0] = 1;
-   input_shape[1] = SEQ_LEN;
-   input_shape[2] = MODEL_FEATURE_COUNT;
-   output_shape[0] = 1;
-   output_shape[1] = 3;
-   if(!OnnxSetInputShape(onnx_handle, 0, input_shape) || !OnnxSetOutputShape(onnx_handle, 0, output_shape)) {
-      Print("[FATAL] OnnxSetShape failed: ", GetLastError());
-      OnnxRelease(onnx_handle);
-      onnx_handle = INVALID_HANDLE;
-      return INIT_FAILED;
-   }
-
-   for(int i = 0; i < HISTORY_SIZE; i++) {
-      history[i].valid = false;
-   }
-
-   ArrayInitialize(input_data, 0.0f);
-   trade.SetExpertMagicNumber(MAGIC_NUMBER);
-   primary_expected_abs_theta = MathMax(2.0, (double)MathMax(2, IMBALANCE_MIN_TICKS / 3));
-   DebugPrint(
-      StringFormat(
-         "init seq=%d horizon=%d history=%d bar_mode=%s imbalance_min_ticks=%d imbalance_span=%d bar_seconds=%d risk_mode=%s fixed_move=%.2f sl=%.2f tp=%.2f lot=%.2f risk_pct=%.3f primary_conf=%.2f",
-         SEQ_LEN,
-         TARGET_HORIZON,
-         REQUIRED_HISTORY_INDEX,
-         (MODEL_USE_FIXED_TIME_BARS != 0 ? "FIXED_TIME" : "IMBALANCE"),
-         IMBALANCE_MIN_TICKS,
-         IMBALANCE_EMA_SPAN,
-         PRIMARY_BAR_SECONDS,
-         (R ? "FIXED" : "ATR"),
-         FIXED_MOVE,
-         SL_MULTIPLIER,
-         TP_MULTIPLIER,
-         LOT_SIZE,
-         RISK_PERCENT,
-         PRIMARY_CONFIDENCE
-      )
-   );
-   if(PRIMARY_CONFIDENCE > 1.0) {
-      Print("[INFO] Live trading disabled because the active model failed the trainer quality gate.");
-   }
-
-   MqlTick tick;
-   if(SymbolInfoTick(_Symbol, tick)) {
-      last_tick_time = tick.time_msc;
-   } else {
-      last_tick_time = TimeCurrent() * 1000ULL;
-   }
-
-   LoadHistory();
-   return INIT_SUCCEEDED;
-}
-
-void OnDeinit(const int reason) {
-   PrintRunSummary();
-   if(onnx_handle != INVALID_HANDLE) {
-      OnnxRelease(onnx_handle);
-   }
-}
-
-void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result) {
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0) {
-      return;
-   }
-   if(!HistoryDealSelect(trans.deal)) {
-      return;
-   }
-   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol) {
-      return;
-   }
-   if((int)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != MAGIC_NUMBER) {
-      return;
-   }
-
-   long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY && entry != DEAL_ENTRY_INOUT) {
-      return;
-   }
-
-   double pnl =
-      HistoryDealGetDouble(trans.deal, DEAL_PROFIT) +
-      HistoryDealGetDouble(trans.deal, DEAL_SWAP) +
-      HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
-   realized_pnl += pnl;
-   closed_trade_count++;
-   if(pnl > 0.0) {
-      closed_win_count++;
-   } else if(pnl < 0.0) {
-      closed_loss_count++;
-   }
-}
-
-void DebugPrint(string message) {
-   if(DEBUG_LOG) {
-      Print("[DEBUG] ", message);
-   }
-}
-
-string SignalName(int signal) {
-   if(signal == 1) {
-      return "BUY";
-   }
-   if(signal == 2) {
-      return "SELL";
-   }
-   return "HOLD";
-}
-
-ulong BarBucket(ulong time_msc) {
-   return time_msc / PRIMARY_BAR_MILLISECONDS;
-}
-
-ulong BarOpenTime(ulong bar_bucket) {
-   return bar_bucket * PRIMARY_BAR_MILLISECONDS;
-}
-
-void StartBar(MqlTick &tick, ulong bar_bucket) {
-   current_bar.o = tick.bid;
-   current_bar.h = tick.bid;
-   current_bar.l = tick.bid;
-   current_bar.c = tick.bid;
-   current_bar.spread = tick.ask - tick.bid;
-   current_bar.tick_imbalance = 0.0;
-   current_bar.atr_feature = 0.0;
-   current_bar.atr_trade = 0.0;
-   current_bar.time_msc = BarOpenTime(bar_bucket);
-   current_bar.valid = false;
-   ticks_in_bar = 0;
-   tick_imbalance_sum = 0.0;
-   current_bar_bucket = bar_bucket;
-   bar_started = true;
-}
-
-void StartImbalanceBar(MqlTick &tick) {
-   current_bar.o = tick.bid;
-   current_bar.h = tick.bid;
-   current_bar.l = tick.bid;
-   current_bar.c = tick.bid;
-   current_bar.spread = tick.ask - tick.bid;
-   current_bar.tick_imbalance = 0.0;
-   current_bar.atr_feature = 0.0;
-   current_bar.atr_trade = 0.0;
-   current_bar.time_msc = tick.time_msc;
-   current_bar.valid = false;
-   ticks_in_bar = 0;
-   tick_imbalance_sum = 0.0;
-   current_bar_bucket = 0;
-   bar_started = true;
-}
-
-bool RollFixedTimeBarIfNeeded(ulong next_bar_bucket, int &closed_tick_count) {
-   closed_tick_count = 0;
-   if(!bar_started || next_bar_bucket == current_bar_bucket) {
-      return false;
-   }
-
-   closed_tick_count = ticks_in_bar;
-   CloseBar();
-   return true;
-}
-
-double StopDistance() {
-   if(R) {
-      return FIXED_MOVE;
-   }
-   return history[0].atr_trade * SL_MULTIPLIER;
-}
-
-double TargetDistance() {
-   if(R) {
-      return FIXED_MOVE;
-   }
-   return history[0].atr_trade * TP_MULTIPLIER;
-}
-
-double NormalizeVolume(double volume) {
-   double min_volume = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN), LOT_MIN);
-   double max_volume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   if(min_volume <= 0.0 || max_volume <= 0.0) {
-      return 0.0;
-   }
-   if(step <= 0.0) {
-      step = min_volume;
-   }
-   if(volume < min_volume - 1e-12) {
-      return 0.0;
-   }
-
-   volume = MathMin(volume, max_volume);
-   double steps = MathFloor(volume / step + 1e-9);
-   double normalized = steps * step;
-   if(normalized < min_volume) {
-      return 0.0;
-   }
-   if(normalized > max_volume) {
-      normalized = max_volume;
-   }
-   return NormalizeDouble(normalized, 8);
-}
-
-double CalculateTradeVolume(int signal, double price, double sl) {
-   if(RISK_PERCENT <= 0.0) {
-      return NormalizeVolume(LOT_SIZE);
-   }
-
-   double risk_amount = AccountInfoDouble(ACCOUNT_BALANCE) * (RISK_PERCENT / 100.0);
-   if(risk_amount <= 0.0) {
-      return 0.0;
-   }
-
-   double one_lot_pnl = 0.0;
-   ENUM_ORDER_TYPE order_type = (signal == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
-   if(!OrderCalcProfit(order_type, _Symbol, 1.0, price, sl, one_lot_pnl)) {
-      DebugPrint(
-         StringFormat(
-            "skip trade: OrderCalcProfit failed retcode=%d last_error=%d",
-            trade.ResultRetcode(),
-            GetLastError()
-         )
-      );
-      return 0.0;
-   }
-
-   double one_lot_loss = MathAbs(one_lot_pnl);
-   if(one_lot_loss <= 0.0) {
-      return 0.0;
-   }
-
-   double volume = risk_amount / one_lot_loss;
-   double manual_cap = NormalizeVolume(LOT_SIZE);
-   if(manual_cap > 0.0) {
-      volume = MathMin(volume, manual_cap);
-   }
-   return NormalizeVolume(volume);
-}
-
-void PrintRunSummary() {
-   Print(
-      StringFormat(
-         "[SUMMARY] bar_mode=%s risk_mode=%s fixed_move=%.2f risk_pct=%.3f predictions=%d hold_skips=%d confidence_skips=%d position_skips=%d stops_too_close=%d volume_skips=%d open_failures=%d trades_opened=%d trades_closed=%d wins=%d losses=%d realized_pnl=%.2f balance=%.2f",
-         (MODEL_USE_FIXED_TIME_BARS != 0 ? "FIXED_TIME" : "IMBALANCE"),
-         (R ? "FIXED" : "ATR"),
-         FIXED_MOVE,
-         RISK_PERCENT,
-         prediction_count,
-         hold_skip_count,
-         confidence_skip_count,
-         position_skip_count,
-         stops_too_close_skip_count,
-         volume_skip_count,
-         trade_open_failed_count,
-         trades_opened_count,
-         closed_trade_count,
-         closed_win_count,
-         closed_loss_count,
-         realized_pnl,
-         AccountInfoDouble(ACCOUNT_BALANCE)
-      )
-   );
-}
-
-int UpdateTickSign(double bid) {
-   int sign = last_sign;
-   if(last_bid <= 0.0) {
-      sign = 1;
-   } else {
-      double diff = bid - last_bid;
-      if(diff > 0.0) {
-         sign = 1;
-      } else if(diff < 0.0) {
-         sign = -1;
-      }
-   }
-
-   last_bid = bid;
-   last_sign = sign;
-   return sign;
-}
-
-void ProcessTick(MqlTick &tick, ulong bar_bucket) {
-   if(tick.bid <= 0.0) {
-      return;
-   }
-
-   if(!bar_started) {
-      if(MODEL_USE_FIXED_TIME_BARS != 0) {
-         StartBar(tick, bar_bucket);
-      } else {
-         StartImbalanceBar(tick);
-      }
-   }
-
-   int tick_sign = UpdateTickSign(tick.bid);
-   current_bar.h = MathMax(current_bar.h, tick.bid);
-   current_bar.l = MathMin(current_bar.l, tick.bid);
-   current_bar.c = tick.bid;
-   current_bar.spread = tick.ask - tick.bid;
-   ticks_in_bar++;
-   tick_imbalance_sum += tick_sign;
-}
-
-void UpdateIndicators(Bar &bar) {
-   Bar prev = history[0];
-   double tr = (warmup_count == 0)
-      ? (bar.h - bar.l)
-      : MathMax(bar.h - bar.l, MathMax(MathAbs(bar.h - prev.c), MathAbs(bar.l - prev.c)));
-   int next_count = warmup_count + 1;
-
-   if(next_count <= FEATURE_ATR_PERIOD) {
-      warmup_sum_feature += tr;
-      bar.atr_feature = warmup_sum_feature / next_count;
-   } else {
-      double prev_atr_feature = (prev.atr_feature > 0.0 ? prev.atr_feature : tr);
-      bar.atr_feature = prev_atr_feature + (tr - prev_atr_feature) / FEATURE_ATR_PERIOD;
-   }
-
-   if(next_count <= TARGET_ATR_PERIOD) {
-      warmup_sum_trade += tr;
-      bar.atr_trade = warmup_sum_trade / next_count;
-   } else {
-      double prev_atr_trade = (prev.atr_trade > 0.0 ? prev.atr_trade : tr);
-      bar.atr_trade = prev_atr_trade + (tr - prev_atr_trade) / TARGET_ATR_PERIOD;
-   }
-
-   warmup_count = next_count;
-   bar.valid = (warmup_count >= WARMUP_BARS);
-}
-
-bool ShouldClosePrimaryBar(double &observed_abs_theta) {
-   if(ticks_in_bar < IMBALANCE_MIN_TICKS) {
-      observed_abs_theta = 0.0;
-      return false;
-   }
-
-   observed_abs_theta = MathAbs(tick_imbalance_sum);
-   return (observed_abs_theta >= primary_expected_abs_theta);
-}
-
-void UpdatePrimaryImbalanceThreshold(double observed_abs_theta) {
-   if(observed_abs_theta <= 0.0) {
-      return;
-   }
-
-   double alpha = 2.0 / (MathMax(1, IMBALANCE_EMA_SPAN) + 1.0);
-   double observed = MathMax(2.0, observed_abs_theta);
-   primary_expected_abs_theta = (1.0 - alpha) * primary_expected_abs_theta + alpha * observed;
-}
-
-void CloseBar() {
-   current_bar.tick_imbalance = tick_imbalance_sum / MathMax(1, ticks_in_bar);
-   UpdateIndicators(current_bar);
-
-   for(int i = HISTORY_SIZE - 1; i > 0; i--) {
-      history[i] = history[i - 1];
-   }
-   history[0] = current_bar;
-
-   ticks_in_bar = 0;
-   tick_imbalance_sum = 0.0;
-   current_bar_bucket = 0;
-   bar_started = false;
-}
-
-void OnTick() {
-   MqlTick ticks[];
-   int count = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, last_tick_time + 1, 100000);
-   if(count <= 0) {
-      return;
-   }
-
-   for(int i = 0; i < count; i++) {
-      if(ticks[i].bid <= 0.0) {
-         continue;
-      }
-
-      if(MODEL_USE_FIXED_TIME_BARS != 0) {
-         ulong tick_bucket = BarBucket(ticks[i].time_msc);
-         int closed_tick_count = 0;
-         if(RollFixedTimeBarIfNeeded(tick_bucket, closed_tick_count)) {
-            DebugPrint(
-               StringFormat(
-                  "bar closed mode=FIXED_TIME seconds=%d ticks=%d atr_trade=%.5f close=%.5f",
-                  PRIMARY_BAR_SECONDS,
-                  closed_tick_count,
-                  history[0].atr_trade,
-                  history[0].c
-               )
-            );
-            if(history[REQUIRED_HISTORY_INDEX].valid) {
-               Predict();
-            } else {
-               DebugPrint(
-                  StringFormat(
-                     "history not ready yet: need index %d valid before predicting",
-                     REQUIRED_HISTORY_INDEX
-                  )
-               );
-            }
-         }
-
-         ProcessTick(ticks[i], tick_bucket);
-         last_tick_time = ticks[i].time_msc;
-         continue;
-      }
-
-      ProcessTick(ticks[i], 0);
-      last_tick_time = ticks[i].time_msc;
-
-      double observed_abs_theta = 0.0;
-      if(ShouldClosePrimaryBar(observed_abs_theta)) {
-         int closed_tick_count = ticks_in_bar;
-         CloseBar();
-         UpdatePrimaryImbalanceThreshold(observed_abs_theta);
-         DebugPrint(
-            StringFormat(
-               "bar closed mode=IMBALANCE ticks=%d theta=%.2f next_threshold=%.2f atr_trade=%.5f close=%.5f",
-               closed_tick_count,
-               observed_abs_theta,
-               primary_expected_abs_theta,
-               history[0].atr_trade,
-               history[0].c
-            )
-         );
-         if(history[REQUIRED_HISTORY_INDEX].valid) {
-            Predict();
-         } else {
-            DebugPrint(
-               StringFormat(
-                  "history not ready yet: need index %d valid before predicting",
-                  REQUIRED_HISTORY_INDEX
-               )
-            );
-         }
-      }
-   }
-}
-
-void LoadHistory() {
-   ulong start_time_msc = (TimeCurrent() - 86400 * 3) * 1000ULL;
-   MqlTick ticks[];
-   int copied = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, start_time_msc, 250000);
-   if(copied <= 0) {
-      start_time_msc = (TimeCurrent() - 86400) * 1000ULL;
-      copied = CopyTicks(_Symbol, ticks, COPY_TICKS_ALL, start_time_msc, 250000);
-   }
-   if(copied <= 0) {
-      return;
-   }
-
-   last_tick_time = ticks[0].time_msc - 1;
-   for(int i = 0; i < copied; i++) {
-      if(ticks[i].bid <= 0.0) {
-         continue;
-      }
-
-      if(MODEL_USE_FIXED_TIME_BARS != 0) {
-         ulong tick_bucket = BarBucket(ticks[i].time_msc);
-         int closed_tick_count = 0;
-         RollFixedTimeBarIfNeeded(tick_bucket, closed_tick_count);
-         ProcessTick(ticks[i], tick_bucket);
-         last_tick_time = ticks[i].time_msc;
-         continue;
-      }
-
-      ProcessTick(ticks[i], 0);
-      last_tick_time = ticks[i].time_msc;
-
-      double observed_abs_theta = 0.0;
-      if(ShouldClosePrimaryBar(observed_abs_theta)) {
-         CloseBar();
-         UpdatePrimaryImbalanceThreshold(observed_abs_theta);
-      }
-   }
-}
-
-float ScaleAndClip(float value, int feature_index) {
-   float iqr = (iqrs[feature_index] > 1e-6f ? iqrs[feature_index] : 1.0f);
-   float scaled = (value - medians[feature_index]) / iqr;
-   return MathMax(-10.0f, MathMin(10.0f, scaled));
-}
-
-double SafeLogRatio(double num, double den) {
-   return MathLog((num + 1e-10) / (den + 1e-10));
-}
-
-double LogReturnAt(int h) {
-   return SafeLogRatio(history[h].c, history[h + 1].c);
-}
-
-double ReturnOverBars(int h, int bars) {
-   return SafeLogRatio(history[h].c, history[h + bars].c);
-}
-
-double RollingStdReturn(int h, int window) {
-   double values[RV_PERIOD];
-   double mean = 0.0;
-   for(int i = 0; i < window; i++) {
-      values[i] = LogReturnAt(h + i);
-      mean += values[i];
-   }
-   mean /= window;
-
-   double var = 0.0;
-   for(int i = 0; i < window; i++) {
-      double diff = values[i] - mean;
-      var += diff * diff;
-   }
-   return MathSqrt(var / window);
-}
-
-void ExtractFeatures(int h, float &features[]) {
-   Bar bar = history[h];
-   Bar prev = history[h + 1];
-   double close = bar.c;
-
-   features[FEATURE_IDX_RET1] = ScaleAndClip((float)LogReturnAt(h), FEATURE_IDX_RET1);
-   features[FEATURE_IDX_HIGH_REL_PREV] = ScaleAndClip((float)SafeLogRatio(bar.h, prev.c), FEATURE_IDX_HIGH_REL_PREV);
-   features[FEATURE_IDX_LOW_REL_PREV] = ScaleAndClip((float)SafeLogRatio(bar.l, prev.c), FEATURE_IDX_LOW_REL_PREV);
-   features[FEATURE_IDX_SPREAD_REL] = ScaleAndClip((float)(bar.spread / (close + 1e-10)), FEATURE_IDX_SPREAD_REL);
-   features[FEATURE_IDX_CLOSE_IN_RANGE] = ScaleAndClip(
-      (float)((close - bar.l) / (bar.h - bar.l + 1e-8)),
-      FEATURE_IDX_CLOSE_IN_RANGE
-   );
-   features[FEATURE_IDX_ATR_REL] = ScaleAndClip((float)(bar.atr_feature / (close + 1e-10)), FEATURE_IDX_ATR_REL);
-   features[FEATURE_IDX_RV] = ScaleAndClip((float)RollingStdReturn(h, RV_PERIOD), FEATURE_IDX_RV);
-   features[FEATURE_IDX_RETURN_N] = ScaleAndClip((float)ReturnOverBars(h, RETURN_PERIOD), FEATURE_IDX_RETURN_N);
-   features[FEATURE_IDX_TICK_IMBALANCE] = ScaleAndClip((float)bar.tick_imbalance, FEATURE_IDX_TICK_IMBALANCE);
-}
-
-void Softmax(const float &logits[], float &probs[]) {
-   double max_logit = MathMax(logits[0], MathMax(logits[1], logits[2]));
-   double e0 = MathExp(logits[0] - max_logit);
-   double e1 = MathExp(logits[1] - max_logit);
-   double e2 = MathExp(logits[2] - max_logit);
-   double sum = e0 + e1 + e2;
-   probs[0] = (float)(e0 / sum);
-   probs[1] = (float)(e1 / sum);
-   probs[2] = (float)(e2 / sum);
-}
-
-void Predict() {
-   prediction_count++;
-   for(int i = 0; i < SEQ_LEN; i++) {
-      int h = SEQ_LEN - 1 - i;
-      int offset = i * MODEL_FEATURE_COUNT;
-      float features[MODEL_FEATURE_COUNT];
-      ExtractFeatures(h, features);
-      for(int k = 0; k < MODEL_FEATURE_COUNT; k++) {
-         input_data[offset + k] = features[k];
-      }
-   }
-
-   if(!OnnxRun(onnx_handle, ONNX_DEFAULT, input_data, output_data)) {
-      DebugPrint(StringFormat("OnnxRun failed err=%d", GetLastError()));
-      return;
-   }
-
-   float probs[3];
-   Softmax(output_data, probs);
-   int signal = ArrayMaximum(probs);
-   DebugPrint(
-      StringFormat(
-         "predict probs=[%.4f, %.4f, %.4f] signal=%s conf=%.4f",
-         probs[0],
-         probs[1],
-         probs[2],
-         SignalName(signal),
-         probs[signal]
-      )
-   );
-   if(signal <= 0) {
-      hold_skip_count++;
-      DebugPrint("skip trade: model chose HOLD");
-      return;
-   }
-   if(probs[signal] < PRIMARY_CONFIDENCE) {
-      confidence_skip_count++;
-      DebugPrint(
-         StringFormat(
-            "skip trade: confidence %.4f below threshold %.4f",
-            probs[signal],
-            PRIMARY_CONFIDENCE
-         )
-      );
-      return;
-   }
-
-   Execute(signal);
-}
-
-void Execute(int signal) {
-   if(PositionSelect(_Symbol)) {
-      position_skip_count++;
-      DebugPrint("skip trade: a position is already open on this symbol");
-      return;
-   }
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   if(bid <= 0.0 || ask <= 0.0) {
-      trade_open_failed_count++;
-      DebugPrint(StringFormat("skip trade: invalid bid/ask bid=%.5f ask=%.5f", bid, ask));
-      return;
-   }
-
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-    double trigger_price = (signal == 1) ? bid : ask;
-    double price = (signal == 1) ? ask : bid;
-    double sl_distance = StopDistance();
-    double tp_distance = TargetDistance();
-    if(sl_distance <= 0.0 || tp_distance <= 0.0) {
-       trade_open_failed_count++;
-       DebugPrint(
-          StringFormat(
-             "skip trade: invalid risk distances sl_distance=%.5f tp_distance=%.5f",
-             sl_distance,
-             tp_distance
-          )
-       );
-       return;
-    }
-    double sl = (signal == 1)
-       ? (trigger_price - sl_distance)
-       : (trigger_price + sl_distance);
-    double tp = (signal == 1)
-       ? (trigger_price + tp_distance)
-       : (trigger_price - tp_distance);
-    price = NormalizeDouble(price, digits);
-    sl = NormalizeDouble(sl, digits);
-    tp = NormalizeDouble(tp, digits);
-
-    double min_stop_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
-    double freeze_dist = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL) * point;
-    double min_dist = MathMax(min_stop_dist, freeze_dist);
-   double sl_gap = (signal == 1) ? (trigger_price - sl) : (sl - trigger_price);
-   double tp_gap = (signal == 1) ? (tp - trigger_price) : (trigger_price - tp);
-   if(sl_gap < min_dist || tp_gap < min_dist) {
-      stops_too_close_skip_count++;
-      DebugPrint(
-         StringFormat(
-            "skip trade: stops too close bid=%.5f ask=%.5f price=%.5f trigger=%.5f sl=%.5f tp=%.5f sl_gap=%.5f tp_gap=%.5f min_dist=%.5f",
-            bid,
-            ask,
-            price,
-            trigger_price,
-            sl,
-            tp,
-            sl_gap,
-            tp_gap,
-            min_dist
-         )
-      );
-      return;
-   }
-
-   double volume = CalculateTradeVolume(signal, price, sl);
-   DebugPrint(
-      StringFormat(
-         "risk_pct=%.3f lot_cap=%.2f",
-         RISK_PERCENT,
-         LOT_SIZE
-      )
-   );
-   if(volume <= 0.0) {
-      volume_skip_count++;
-      DebugPrint(
-         StringFormat(
-            "skip trade: no valid volume price=%.5f sl=%.5f risk_pct=%.3f lot_cap=%.2f",
-            price,
-            sl,
-            RISK_PERCENT,
-            LOT_SIZE
-         )
-      );
-      return;
-   }
-
-   double sl_pct_change = (sl - price) / price * 100.0;
-   double tp_pct_change = (tp - price) / price * 100.0;
-   DebugPrint(
-      StringFormat(
-         "Intent to place trade: volume=%.2f sl=%.5f tp=%.5f sl_pct_change=%.3f%% tp_pct_change=%.3f%%",
-         volume,
-         sl,
-         tp,
-         sl_pct_change,
-         tp_pct_change
-      )
-   );
-
-   bool opened = trade.PositionOpen(_Symbol, (signal == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL), volume, price, sl, tp);
-   if(opened) {
-      trades_opened_count++;
-      DebugPrint(
-         StringFormat(
-            "trade opened %s lot=%.2f price=%.5f sl=%.5f tp=%.5f",
-            SignalName(signal),
-            volume,
-            price,
-            sl,
-            tp
-         )
-      );
-   } else {
-      trade_open_failed_count++;
-      DebugPrint(
-         StringFormat(
-            "trade open failed %s retcode=%d last_error=%d",
-            SignalName(signal),
-            trade.ResultRetcode(),
-            GetLastError()
-         )
-      );
-   }
-}
+double ResolveAuxBid(string symbol, bool &available, double &last_value, double fallback);
+
+
+#include "live/functions/OnInit.mqh"
+#include "live/functions/OnDeinit.mqh"
+#include "live/functions/OnTradeTransaction.mqh"
+#include "live/functions/DebugPrint.mqh"
+#include "live/functions/SignalName.mqh"
+#include "live/functions/BarBucket.mqh"
+#include "live/functions/BarOpenTime.mqh"
+#include "live/functions/StartBar.mqh"
+#include "live/functions/StartImbalanceBar.mqh"
+#include "live/functions/RollFixedTimeBarIfNeeded.mqh"
+#include "live/functions/ResolveImbalanceThresholdBase.mqh"
+#include "live/functions/StopDistance.mqh"
+#include "live/functions/TargetDistance.mqh"
+#include "live/functions/ResolveMinimumVolume.mqh"
+#include "live/functions/NormalizeVolume.mqh"
+#include "live/functions/CalculateTradeVolume.mqh"
+#include "live/functions/PrintRunSummary.mqh"
+#include "live/functions/UpdateTickSign.mqh"
+#include "live/functions/ProcessTick.mqh"
+#include "live/functions/ResolveAuxBid.mqh"
+#include "live/functions/UpdateIndicators.mqh"
+#include "live/functions/ShouldClosePrimaryBar.mqh"
+#include "live/functions/UpdatePrimaryImbalanceThreshold.mqh"
+#include "live/functions/CloseBar.mqh"
+#include "live/functions/OnTick.mqh"
+#include "live/functions/LoadHistory.mqh"
+#include "live/functions/ScaleAndClip.mqh"
+#include "live/functions/SafeLogRatio.mqh"
+#include "live/functions/LogReturnAt.mqh"
+#include "live/functions/ReturnOverBars.mqh"
+#include "live/functions/RollingStdReturn.mqh"
+#include "live/functions/MeanClose.mqh"
+#include "live/functions/StdClose.mqh"
+#include "live/functions/MaxHigh.mqh"
+#include "live/functions/MinLow.mqh"
+#include "live/functions/MeanTickCount.mqh"
+#include "live/functions/StdTickCount.mqh"
+#include "live/functions/MeanTickImbalance.mqh"
+#include "live/functions/MeanSpreadRel.mqh"
+#include "live/functions/StdSpreadRel.mqh"
+#include "live/functions/MeanAtrFeature.mqh"
+#include "live/functions/TrueRangeAt.mqh"
+#include "live/functions/SimpleAtr.mqh"
+#include "live/functions/EmaClose.mqh"
+#include "live/functions/MacdAt.mqh"
+#include "live/functions/TypicalPrice.mqh"
+#include "live/functions/SimpleCci.mqh"
+#include "live/functions/WilliamsR.mqh"
+#include "live/functions/SimpleRsi.mqh"
+#include "live/functions/StochK.mqh"
+#include "live/functions/StochD.mqh"
+#include "live/functions/ExtractFeatures.mqh"
+#include "live/functions/Softmax.mqh"
+#include "live/functions/Predict.mqh"
+#include "live/functions/Execute.mqh"

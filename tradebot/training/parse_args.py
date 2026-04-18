@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from .shared import *  # noqa: F401,F403
+
+def parse_args() -> argparse.Namespace:
+    project = resolve_active_project_config(resolve_active_config_path())
+    apply_shared_settings(project.values, project=project, shared_config_path=project.config_path)
+    values = project.values
+    use_fixed_time_bars = bool(values.get("USE_FIXED_TIME_BARS", values.get("USE_SECOND_BARS", False)))
+    use_custom_lr = bool(values.get("USE_CUSTOM_LEARNING_RATE", False))
+    use_custom_weight_decay = bool(values.get("USE_CUSTOM_WEIGHT_DECAY", False))
+    use_max_bars = bool(values.get("USE_MAX_BARS", False))
+    return argparse.Namespace(
+        config_path=str(project.config_path),
+        config_project=project,
+        symbol=str(values.get("SYMBOL", "XAUUSD")).strip() or "XAUUSD",
+        data_file=str(values.get("DATA_FILE", DEFAULT_DATA_FILE)),
+        output_file=DEFAULT_OUTPUT_FILE,
+        name=str(values.get("MODEL_NAME", "")).strip(),
+        epochs=int(values.get("DEFAULT_EPOCHS", DEFAULT_EPOCHS)),
+        batch_size=int(values.get("DEFAULT_BATCH_SIZE", DEFAULT_BATCH_SIZE)),
+        max_train_windows=int(values.get("DEFAULT_MAX_TRAIN_WINDOWS", DEFAULT_MAX_TRAIN_WINDOWS)),
+        max_eval_windows=int(values.get("DEFAULT_MAX_EVAL_WINDOWS", DEFAULT_MAX_EVAL_WINDOWS)),
+        max_bars=int(values.get("MAX_BARS", 0)) if use_max_bars else 0,
+        patience=int(values.get("DEFAULT_PATIENCE", DEFAULT_PATIENCE)),
+        device=str(values.get("DEVICE", "cpu")).strip() or "cpu",
+        focal_gamma=float(values.get("FOCAL_GAMMA", DEFAULT_FOCAL_GAMMA)),
+        use_fixed_risk=bool(values.get("USE_FIXED_TARGETS", False)),
+        use_fixed_time_bars=use_fixed_time_bars,
+        use_fixed_tick_bars=bool(values.get("USE_FIXED_TICK_BARS", False)),
+        primary_tick_density=int(values.get("PRIMARY_TICK_DENSITY", DEFAULT_PRIMARY_TICK_DENSITY)),
+        use_extended_features=not bool(values.get("USE_MINIMAL_FEATURE_SET", False)),
+        no_hold=bool(values.get("USE_NO_HOLD", False)),
+        config_architecture=project.architecture,
+        gold=False,
+        gold_new=False,
+        gold_context=bool(values.get("USE_GOLD_CONTEXT", False)),
+        use_minirocket_encoder=False,
+        use_castor_encoder=False,
+        ela=False,
+        use_fusion_lstm_encoder=False,
+        use_bilstm_encoder=False,
+        use_gru_encoder=False,
+        use_tcn_encoder=False,
+        use_legacy_lstm_attention=False,
+        use_tla_encoder=False,
+        use_chronos_bolt=False,
+        chronos_bolt_model=str(values.get("CHRONOS_BOLT_MODEL", DEFAULT_CHRONOS_BOLT_MODEL_ID)),
+        chronos_patch_aligned_context=bool(values.get("USE_CHRONOS_PATCH_ALIGNED_CONTEXT", False)),
+        chronos_auto_context=bool(values.get("USE_CHRONOS_AUTO_CONTEXT", False)),
+        chronos_ensemble_contexts=bool(values.get("USE_CHRONOS_ENSEMBLE_CONTEXTS", False)),
+        use_multihead_attention=bool(values.get("USE_MULTIHEAD_ATTENTION", False)),
+        minirocket_features=int(values.get("MINIROCKET_FEATURES", DEFAULT_MINIROCKET_FEATURES)),
+        attention_dim=int(values.get("ATTENTION_DIM", DEFAULT_MINIROCKET_ATTENTION_DIM)),
+        attention_heads=int(values.get("ATTENTION_HEADS", DEFAULT_ATTENTION_HEADS)),
+        attention_layers=int(values.get("ATTENTION_LAYERS", DEFAULT_ATTENTION_LAYERS)),
+        attention_dropout=float(values.get("ATTENTION_DROPOUT", DEFAULT_ATTENTION_DROPOUT)),
+        sequence_hidden_size=int(values.get("SEQUENCE_HIDDEN_SIZE", DEFAULT_SEQUENCE_HIDDEN_SIZE)),
+        sequence_layers=int(values.get("SEQUENCE_LAYERS", DEFAULT_SEQUENCE_LAYERS)),
+        sequence_dropout=float(values.get("SEQUENCE_DROPOUT", DEFAULT_SEQUENCE_DROPOUT)),
+        tcn_levels=int(values.get("TCN_LEVELS", DEFAULT_TCN_LEVELS)),
+        tcn_kernel_size=int(values.get("TCN_KERNEL_SIZE", DEFAULT_TCN_KERNEL_SIZE)),
+        metaeditor_path=str(values.get("METAEDITOR_PATH", "")).strip(),
+        skip_live_compile=bool(values.get("SKIP_LIVE_COMPILE", False)),
+        archive_only=False,
+        loss_mode=str(values.get("LOSS_MODE", "auto")).strip() or "auto",
+        lr=float(values.get("LEARNING_RATE", 0.0)) if use_custom_lr else 0.0,
+        weight_decay=float(values.get("WEIGHT_DECAY", 0.0)) if use_custom_weight_decay else -1.0,
+        min_selected_trades=int(values.get("MIN_SELECTED_TRADES", DEFAULT_MIN_SELECTED_TRADES)),
+        min_trade_precision=float(values.get("MIN_TRADE_PRECISION", DEFAULT_MIN_TRADE_PRECISION)),
+        confidence_search_min=float(values.get("CONFIDENCE_SEARCH_MIN", DEFAULT_CONFIDENCE_SEARCH_MIN)),
+        confidence_search_max=float(values.get("CONFIDENCE_SEARCH_MAX", DEFAULT_CONFIDENCE_SEARCH_MAX)),
+        confidence_search_steps=int(values.get("CONFIDENCE_SEARCH_STEPS", DEFAULT_CONFIDENCE_SEARCH_STEPS)),
+    )
