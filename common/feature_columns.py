@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Mapping
+
+from common.past_dir_features import parse_past_dir_features
 
 MINIMAL_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "ret1",
@@ -106,7 +108,7 @@ MAIN_GOLD_CONTEXT_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "usdx_pct_change",
     "usdjpy_pct_change",
 )
-ALL_FEATURE_COLUMNS: Final[tuple[str, ...]] = tuple(
+_STATIC_ALL_FEATURE_COLUMNS: Final[tuple[str, ...]] = tuple(
     dict.fromkeys(
         MINIMAL_FEATURE_COLUMNS
         + GOLD_CONTEXT_FEATURE_COLUMNS
@@ -114,3 +116,21 @@ ALL_FEATURE_COLUMNS: Final[tuple[str, ...]] = tuple(
         + MAIN_FEATURE_COLUMNS
     )
 )
+
+
+def resolve_all_feature_columns(
+    values: Mapping[str, object] | None = None,
+) -> tuple[str, ...]:
+    """Return all known feature names, including enabled dynamic `past_dir_*`.
+
+    `ALL_FEATURE_COLUMNS` remains the static built-in catalog. Pass config values
+    here when code needs the full runtime feature universe.
+    """
+
+    feature_columns = list(_STATIC_ALL_FEATURE_COLUMNS)
+    if values is not None:
+        feature_columns.extend(parse_past_dir_features(dict(values)))
+    return tuple(dict.fromkeys(feature_columns))
+
+
+ALL_FEATURE_COLUMNS: Final[tuple[str, ...]] = resolve_all_feature_columns()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from .shared import *  # noqa: F401,F403
 
 
@@ -30,6 +32,7 @@ def write_diagnostics(
     loss_mode: str,
     focal_gamma: float,
     model_config_text: str,
+    dataset_fingerprint: dict[str, str | int],
     feature_columns: tuple[str, ...],
     feature_profile: str,
     point_size: float,
@@ -69,6 +72,10 @@ def write_diagnostics(
     val_confusion.to_csv(diagnostics_dir / "validation_confusion_matrix.csv")
     test_confusion.to_csv(diagnostics_dir / "holdout_confusion_matrix.csv")
     (diagnostics_dir / "config.mqh").write_text(model_config_text, encoding="utf-8")
+    (diagnostics_dir / "training_dataset.json").write_text(
+        json.dumps(dataset_fingerprint, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     (diagnostics_dir / "active_features.txt").write_text(
         "\n".join(feature_columns) + "\n", encoding="utf-8"
     )
@@ -83,6 +90,12 @@ def write_diagnostics(
         f"- feature_count: {len(feature_columns)}",
         f"- loss_mode: {loss_mode}",
         f"- focal_gamma: {focal_gamma:.2f}",
+        "",
+        "## Training Dataset",
+        f"- path: {dataset_fingerprint['path']}",
+        f"- size_bytes: {dataset_fingerprint['size_bytes']}",
+        f"- modified_utc: {dataset_fingerprint['modified_utc']}",
+        f"- sha256: {dataset_fingerprint['sha256']}",
         "",
         "## Shared Config",
         f"- seq_len: {config.seq_len}",
@@ -184,6 +197,7 @@ def write_diagnostics(
         "- holdout_predictions.csv",
         "- validation_confusion_matrix.csv",
         "- holdout_confusion_matrix.csv",
+        "- training_dataset.json",
         "- active_features.txt",
         "- config.mqh",
         "",

@@ -164,7 +164,14 @@ No code reads this file, no docs reference it. Either document it or remove it.
 | F7 | `data.mq5` included wrong config path |
 | F8 | `move_ticks.py` wrong `parents` depth |
 | F9 | `i.sh` heredoc variable expansion broken |
+| F16 | Archived models now store `training_dataset.json` with CSV path, size, timestamp, and SHA-256 |
+| F17 | Data export now writes immutable versioned snapshots before atomically refreshing `ticks.csv` |
+| F18 | Robust scaler now fits on explicit `train_range[0]:train_range[1]` training rows |
+| F19 | Same scaler fix preserves embargo safety if train start offset changes later |
+| F20 | Added `resolve_all_feature_columns(values)` for correct dynamic `past_dir_*` enumeration |
 | F15 | Deployment missed `live/functions/` source tree |
 | F21 | `FeatureEngineeringConfig` missing `primary_bar_seconds` |
+| F22 | `bitcoin.config` now points at canonical `data/BTCUSD/ticks.csv` |
+| F23 | Added missing `symbols/xauusd/config/config.mqh` preset and loadable `gold.config` overlay |
 | F24 | README out of date |
 | F25 | AGENTS.md wrong active-config path/name |

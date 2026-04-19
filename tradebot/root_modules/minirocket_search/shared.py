@@ -8,5 +8,6 @@ import numpy as np
 import torch
 from torch import nn as torch_nn
 
+from tradebot.pipeline.training_utils import fit_robust_scaler
 import tradebot.training as nn
 from tradebot.root_modules.minirocket_classifier import fit_minirocket, transform_sequences

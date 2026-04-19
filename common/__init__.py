@@ -29,6 +29,7 @@ from common.features import (
     lookback_requirement,
     max_feature_lookback,
     minimal_feature_switch_name,
+    resolve_all_feature_columns,
 )
 from common.past_dir_features import parse_past_dir_features, past_dir_lookback_bars
 
@@ -37,6 +38,7 @@ __all__ = [
     "parse_past_dir_features",
     "past_dir_lookback_bars",
     "ALL_FEATURE_COLUMNS",
+    "resolve_all_feature_columns",
     "EXTRA_FEATURE_COLUMNS",
     "GOLD_CONTEXT_FEATURE_COLUMNS",
     "MAIN_FEATURE_COLUMNS",

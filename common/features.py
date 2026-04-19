@@ -9,6 +9,7 @@ from common.feature_columns import (
     MAIN_FEATURE_COLUMNS,
     MAIN_GOLD_CONTEXT_FEATURE_COLUMNS,
     MINIMAL_FEATURE_COLUMNS,
+    resolve_all_feature_columns,
 )
 from common.feature_index_macro_name import feature_index_macro_name
 from common.feature_macro_name import feature_macro_name

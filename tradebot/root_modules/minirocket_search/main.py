@@ -25,11 +25,7 @@ def main() -> None:
     val_range = (train_end + embargo, val_end)
     test_range = (val_end + embargo, n_rows)
 
-    median = np.nanmedian(x[: train_range[1]], axis=0)
-    median = np.nan_to_num(median, nan=0.0)
-    iqr = np.nanpercentile(x[: train_range[1]], 75, axis=0) - np.nanpercentile(x[: train_range[1]], 25, axis=0)
-    iqr = np.nan_to_num(iqr, nan=1.0)
-    iqr = np.where(iqr < 1e-6, 1.0, iqr)
+    median, iqr = fit_robust_scaler(x[train_range[0] : train_range[1]])
     x_scaled = np.clip((x - median) / iqr, -10.0, 10.0).astype(np.float32)
     valid_mask = ~np.isnan(x_scaled).any(axis=1)
 

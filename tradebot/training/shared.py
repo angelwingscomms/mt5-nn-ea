@@ -63,6 +63,7 @@ from tradebot.pipeline.training_utils import (
 from tradebot.pipeline.training_utils import (
     evaluate_model as run_model_evaluation,
 )
+from tradebot.pipeline.training_utils import fit_robust_scaler
 from tradebot.pipeline.training_utils import (
     gate_metrics as compute_gate_metrics,
 )

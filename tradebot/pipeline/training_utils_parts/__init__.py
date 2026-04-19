@@ -22,6 +22,8 @@ from . import choose_confidence_threshold as _module_8
 from .choose_confidence_threshold import choose_confidence_threshold
 from . import summarize_gate as _module_9
 from .summarize_gate import summarize_gate
+from . import fit_robust_scaler as _module_10
+from .fit_robust_scaler import fit_robust_scaler
 
 _MODULES = [
     _module_0,
@@ -34,6 +36,7 @@ _MODULES = [
     _module_7,
     _module_8,
     _module_9,
+    _module_10,
 ]
 _PACKAGE_GLOBALS = globals()
 for _module in _MODULES:

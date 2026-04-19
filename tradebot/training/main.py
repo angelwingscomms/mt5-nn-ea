@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import keyboard
 
 import tradebot.training.shared as _shared
 
 from .shared import *  # noqa: F401,F403
+from .build_dataset_fingerprint import build_dataset_fingerprint
 
 _stop_requested = False
 
@@ -353,13 +355,7 @@ def main() -> None:
     if test_range[0] >= test_range[1]:
         raise ValueError("Dataset is too small for leakage-safe train/val/test splits.")
 
-    median = np.nanmedian(x[: train_range[1]], axis=0)
-    median = np.nan_to_num(median, nan=0.0)
-    iqr = np.nanpercentile(x[: train_range[1]], 75, axis=0) - np.nanpercentile(
-        x[: train_range[1]], 25, axis=0
-    )
-    iqr = np.nan_to_num(iqr, nan=1.0)
-    iqr = np.where(iqr < 1e-6, 1.0, iqr)
+    median, iqr = fit_robust_scaler(x[train_range[0] : train_range[1]])
     x_scaled = np.clip((x - median) / iqr, -10.0, 10.0).astype(np.float32)
     valid_mask = ~np.isnan(x_scaled).any(axis=1)
 
@@ -1001,6 +997,7 @@ def main() -> None:
     if export_model is None:
         raise RuntimeError("Model export path was not initialized.")
 
+    dataset_fingerprint = build_dataset_fingerprint(data_path)
     completed_at = datetime.now()
     model_dir_name = format_model_dir_name(
         value=completed_at,
@@ -1015,6 +1012,7 @@ def main() -> None:
     model_test_dir.mkdir(parents=True, exist_ok=True)
     archive_output_path = model_dir / "model.onnx"
     combined_model_config_path = model_dir / "config.mqh"
+    dataset_fingerprint_path = model_dir / "training_dataset.json"
 
     export_model.eval()
     export_model.to("cpu")
@@ -1042,6 +1040,10 @@ def main() -> None:
         + "\n"
     )
     combined_model_config_path.write_text(model_config_text, encoding="utf-8")
+    dataset_fingerprint_path.write_text(
+        json.dumps(dataset_fingerprint, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     write_diagnostics_report(
         diagnostics_dir=diagnostics_dir,
         config=DiagnosticsConfig(
@@ -1096,6 +1098,7 @@ def main() -> None:
         loss_mode=loss_mode,
         focal_gamma=args.focal_gamma,
         model_config_text=model_config_text,
+        dataset_fingerprint=dataset_fingerprint,
         feature_columns=feature_columns,
         feature_profile=feature_profile,
         point_size=point_size,
@@ -1129,6 +1132,7 @@ def main() -> None:
         log.info("Saved live compile log to %s", compile_log_path)
     log.info("Archived ONNX to %s", archive_output_path)
     log.info("Saved combined model config to %s", combined_model_config_path)
+    log.info("Saved training dataset fingerprint to %s", dataset_fingerprint_path)
     log.info("Saved diagnostics to %s", diagnostics_dir)
     log.info("Archived model artifacts to %s", model_dir)
     log.info("Total runtime: %.2fs", time.time() - t0)
