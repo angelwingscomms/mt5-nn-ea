@@ -104,6 +104,7 @@ def main():
     parser.add_argument('-c', '--count', type=int, default=1500, help='Number of ticks to generate')
     parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'random', 'mixed'], help='Pattern to use')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
+    parser.add_argument('-w', '--overwrite', action='store_true', help='Overwrite if file exists')
     
     args = parser.parse_args()
 
@@ -130,7 +131,7 @@ def main():
     filename = f'data/synth/{args.name}.csv'
     # Always add .csv extension (in case user already included it)
     filename = filename.rstrip('.csv') + '.csv'
-    if os.path.exists(filename):
+    if os.path.exists(filename) and not args.overwrite:
         logging.error(f"File already exists: {filename}")
         print(f"ERROR: File already exists: {filename}")
         sys.exit(1)
