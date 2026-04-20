@@ -35,7 +35,7 @@ def main() -> None:
         "CURRENT_CONFIG_PATH",
         "SYMBOL",
         "SEQ_LEN",
-        "TARGET_HORIZON",
+        "LABEL_TIMEOUT_BARS",
         "FEATURE_ATR_PERIOD",
         "FEATURE_ATR_RATIO_PERIOD",
         "FEATURE_BOLLINGER_PERIOD",
@@ -285,12 +285,12 @@ def main() -> None:
     device = torch.device(requested_device)
     log.info("Using device: %s", device)
     log.info(
-        "Shared config | path=%s seq_len=%d horizon=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
+        "Shared config | path=%s seq_len=%d label_timeout=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
         "bar_mode=%s imbalance_min_ticks=%d imbalance_ema_span=%d bar_seconds=%d tick_density=%d risk_mode=%s fixed_move_points=%.2f "
         "label_sl=%.2f label_tp=%.2f exec_sl=%.2f exec_tp=%.2f use_all_windows=%d",
         CURRENT_CONFIG_PATH,
         SEQ_LEN,
-        TARGET_HORIZON,
+        LABEL_TIMEOUT_BARS,
         FEATURE_ATR_PERIOD,
         TARGET_ATR_PERIOD,
         RV_PERIOD,
@@ -363,7 +363,7 @@ def main() -> None:
         bars,
         use_atr_risk=use_atr_risk,
         fixed_move_price=fixed_move_price,
-        target_horizon=TARGET_HORIZON,
+        label_timeout_bars=LABEL_TIMEOUT_BARS,
         target_atr_period=TARGET_ATR_PERIOD,
         label_tp_multiplier=LABEL_TP_MULTIPLIER,
         label_sl_multiplier=LABEL_SL_MULTIPLIER,
@@ -374,7 +374,7 @@ def main() -> None:
     x = x_all[WARMUP_BARS:]
     y = y_all[WARMUP_BARS:]
     n_rows = len(x)
-    embargo = max(SEQ_LEN, TARGET_HORIZON)
+    embargo = max(SEQ_LEN, LABEL_TIMEOUT_BARS)
 
     train_end = int(n_rows * 0.70)
     val_end = int(n_rows * 0.85)
@@ -389,13 +389,13 @@ def main() -> None:
     valid_mask = ~np.isnan(x_scaled).any(axis=1)
 
     train_end_idx_all = build_segment_end_indices(
-        valid_mask, *train_range, SEQ_LEN, TARGET_HORIZON
+        valid_mask, *train_range, SEQ_LEN, LABEL_TIMEOUT_BARS
     )
     val_end_idx_all = build_segment_end_indices(
-        valid_mask, *val_range, SEQ_LEN, TARGET_HORIZON
+        valid_mask, *val_range, SEQ_LEN, LABEL_TIMEOUT_BARS
     )
     test_end_idx_all = build_segment_end_indices(
-        valid_mask, *test_range, SEQ_LEN, TARGET_HORIZON
+        valid_mask, *test_range, SEQ_LEN, LABEL_TIMEOUT_BARS
     )
     train_end_idx = maybe_cap_windows(
         train_end_idx_all, args.max_train_windows, USE_ALL_WINDOWS
@@ -459,7 +459,7 @@ def main() -> None:
             "Chronos-Bolt backend | model_id=%s feature_profile=%s prediction_length=%d",
             args.chronos_bolt_model,
             feature_profile,
-            TARGET_HORIZON,
+            LABEL_TIMEOUT_BARS,
         )
         chronos_bolt_batch_size = max(1, min(args.batch_size, 16))
         if chronos_bolt_batch_size != args.batch_size:
@@ -473,7 +473,7 @@ def main() -> None:
             median=median,
             iqr=iqr,
             feature_columns=feature_columns,
-            prediction_length=TARGET_HORIZON,
+            prediction_length=LABEL_TIMEOUT_BARS,
             use_atr_risk=use_atr_risk,
             label_tp_multiplier=LABEL_TP_MULTIPLIER,
             label_sl_multiplier=LABEL_SL_MULTIPLIER,
@@ -1069,7 +1069,7 @@ def main() -> None:
         config=DiagnosticsConfig(
             current_config_name=CURRENT_CONFIG_PATH.name,
             seq_len=SEQ_LEN,
-            target_horizon=TARGET_HORIZON,
+            target_horizon=LABEL_TIMEOUT_BARS,
             primary_bar_seconds=PRIMARY_BAR_SECONDS,
             imbalance_min_ticks=IMBALANCE_MIN_TICKS,
             imbalance_ema_span=IMBALANCE_EMA_SPAN,
