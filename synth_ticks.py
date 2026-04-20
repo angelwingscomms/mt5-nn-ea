@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+import argparse
+import numpy as np
+import csv
+import os
+from dataclasses import dataclass
+from enum import Enum
+from typing import Callable
+
+class Randomness(Enum):
+    """Randomness levels: 0=deterministic, 10=pure random"""
+    NONE = 0
+    LOW = 2
+    MEDIUM = 5
+    HIGH = 8
+    CHAOS = 10
+
+@dataclass
+class TickGenerator:
+    """Generates synthetic tick data with configurable chaos + patterns"""
+    
+    base_price: float = 100.0
+    spread: float = 0.1  # bid-ask spread
+    randomness: Randomness = Randomness.MEDIUM
+    volatility: float = 0.5  # affects noise magnitude
+    
+    def _get_noise(self, num_ticks: int) -> np.ndarray:
+        """Noise scaled by randomness level"""
+        if self.randomness.value == 0:
+            return np.zeros(num_ticks)
+        
+        noise = np.random.normal(0, self.volatility, num_ticks)
+        return noise * (self.randomness.value / 10.0)
+    
+    def trend_pattern(self, num_ticks: int, direction: float = 1.0) -> np.ndarray:
+        """Linear trend + noise
+        direction: 1.0 = up, -1.0 = down, 0.5 = weak up
+        """
+        trend = np.linspace(0, direction * 2.0, num_ticks)
+        noise = self._get_noise(num_ticks)
+        return self.base_price + trend + noise
+    
+    def mean_reversion_pattern(self, num_ticks: int, mean: float = None) -> np.ndarray:
+        """Oscillates around mean, real-world-like"""
+        if mean is None:
+            mean = self.base_price
+        
+        prices = [mean]
+        for _ in range(num_ticks - 1):
+            # Pull toward mean 30% + random walk
+            reversion = 0.3 * (mean - prices[-1])
+            random_step = np.random.normal(0, self.volatility)
+            noise = random_step * (self.randomness.value / 10.0)
+            prices.append(prices[-1] + reversion + noise)
+        
+        return np.array(prices)
+    
+    def reversal_pattern(self, num_ticks: int, pivot_point: float = 0.5) -> np.ndarray:
+        """Reversal: up then down (or vice versa)
+        pivot_point: where (0-1) the reversal happens
+        """
+        pivot_idx = int(num_ticks * pivot_point)
+        
+        up_trend = np.linspace(0, 3.0, pivot_idx)
+        down_trend = np.linspace(3.0, 0, num_ticks - pivot_idx)
+        
+        trend = np.concatenate([up_trend, down_trend])
+        noise = self._get_noise(num_ticks)
+        return self.base_price + trend + noise
+    
+    def multi_scale_oscillation(self, num_ticks: int, frequencies: list[float] = None) -> np.ndarray:
+        """Multiple sine waves at different scales (realistic complexity)
+        frequencies: list of oscillation frequencies
+        """
+        if frequencies is None:
+            frequencies = [0.02, 0.005, 0.001]  # Multiple timeframes
+        
+        t = np.arange(num_ticks)
+        price = self.base_price
+        
+        for freq in frequencies:
+            price = price + np.sin(2 * np.pi * freq * t) * (2.0 / len(frequencies))
+        
+        noise = self._get_noise(num_ticks)
+        return price + noise
+
+    def generate_ticks(self, num_ticks: int, pattern_fn: Callable) -> np.ndarray:
+        """Generate bid/ask prices from pattern function"""
+        mid_prices = pattern_fn(num_ticks)
+        
+        bid = mid_prices - self.spread / 2
+        ask = mid_prices + self.spread / 2
+        
+        return np.column_stack([bid, ask])
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate synthetic tick data")
+    parser.add_argument('-r', '--randomness', type=int, default=5, choices=range(11), help='Randomness level (0-10)')
+    parser.add_argument('-n', '--name', type=str, default='default', help='Custom name for the output file')
+    parser.add_argument('-t', '--ticks', type=int, default=1500, help='Number of ticks to generate')
+    parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'mixed'], help='Pattern to use')
+    
+    args = parser.parse_args()
+    
+    randomness = Randomness(args.randomness)
+    gen = TickGenerator(randomness=randomness)
+    
+    if args.pattern == 'mixed':
+        # Generate mixed patterns like scenario 4
+        ticks = []
+        patterns = [gen.trend_pattern, gen.mean_reversion_pattern, gen.reversal_pattern]
+        segment_ticks = args.ticks // len(patterns)
+        for pattern in patterns:
+            segment = gen.generate_ticks(segment_ticks, pattern)
+            ticks.append(segment)
+        all_ticks = np.vstack(ticks)
+    else:
+        pattern_map = {
+            'trend': lambda: gen.trend_pattern(args.ticks),
+            'mean_reversion': lambda: gen.mean_reversion_pattern(args.ticks),
+            'reversal': lambda: gen.reversal_pattern(args.ticks),
+            'oscillation': lambda: gen.multi_scale_oscillation(args.ticks)
+        }
+        mid_prices = pattern_map[args.pattern]()
+        all_ticks = np.column_stack([mid_prices - gen.spread/2, mid_prices + gen.spread/2])
+    
+    # Ensure directory exists
+    os.makedirs('data/synth', exist_ok=True)
+    
+    # Save to CSV
+    filename = f'data/synth/{args.name}.csv'
+    with open(filename, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['bid', 'ask'])
+        writer.writerows(all_ticks)
+    
+    print(f"Generated {len(all_ticks)} ticks and saved to {filename}")
+
+if __name__ == '__main__':
+    main()</content>
+<parameter name="filePath">synth_ticks.py
