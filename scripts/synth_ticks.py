@@ -3,6 +3,9 @@ import argparse
 import numpy as np
 import csv
 import os
+import time
+import datetime
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
@@ -97,11 +100,19 @@ def main():
     parser = argparse.ArgumentParser(description="Generate synthetic tick data")
     parser.add_argument('-r', '--randomness', type=int, default=5, choices=range(11), help='Randomness level (0-10)')
     parser.add_argument('-n', '--name', type=str, default='default', help='Custom name for the output file')
-    parser.add_argument('-t', '--ticks', type=int, default=1500, help='Number of ticks to generate')
+    parser.add_argument('-c', '--count', type=int, default=1500, help='Number of ticks to generate')
     parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'mixed'], help='Pattern to use')
     
     args = parser.parse_args()
-    
+
+    # If no arguments provided, use defaults
+    if len(sys.argv) == 1:
+        current = datetime.datetime.now()
+        mmss = current.strftime("%M%S")
+        args.randomness = 0
+        args.count = 14400000
+        args.name = f"defaultmmss{mmss}"
+
     randomness = Randomness(args.randomness)
     gen = TickGenerator(randomness=randomness)
     
@@ -109,29 +120,34 @@ def main():
         # Generate mixed patterns like scenario 4
         ticks = []
         patterns = [gen.trend_pattern, gen.mean_reversion_pattern, gen.reversal_pattern]
-        segment_ticks = args.ticks // len(patterns)
+        segment_ticks = args.count // len(patterns)
         for pattern in patterns:
             segment = gen.generate_ticks(segment_ticks, pattern)
             ticks.append(segment)
         all_ticks = np.vstack(ticks)
     else:
         pattern_map = {
-            'trend': lambda: gen.trend_pattern(args.ticks),
-            'mean_reversion': lambda: gen.mean_reversion_pattern(args.ticks),
-            'reversal': lambda: gen.reversal_pattern(args.ticks),
-            'oscillation': lambda: gen.multi_scale_oscillation(args.ticks)
+            'trend': lambda: gen.trend_pattern(args.count),
+            'mean_reversion': lambda: gen.mean_reversion_pattern(args.count),
+            'reversal': lambda: gen.reversal_pattern(args.count),
+            'oscillation': lambda: gen.multi_scale_oscillation(args.count)
         }
         mid_prices = pattern_map[args.pattern]()
         all_ticks = np.column_stack([mid_prices - gen.spread/2, mid_prices + gen.spread/2])
-    
+
+    # Add timestamps
+    start_time = int(time.time() * 1000)
+    times = np.arange(args.count) * 100 + start_time  # 100ms intervals
+    all_ticks = np.column_stack([times, all_ticks])
+
     # Ensure directory exists
     os.makedirs('data/synth', exist_ok=True)
-    
+
     # Save to CSV
     filename = f'data/synth/{args.name}.csv'
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['bid', 'ask'])
+        writer.writerow(['time_msc', 'bid', 'ask'])
         writer.writerows(all_ticks)
     
     print(f"Generated {len(all_ticks)} ticks and saved to {filename}")
