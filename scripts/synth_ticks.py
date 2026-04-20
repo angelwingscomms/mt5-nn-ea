@@ -6,6 +6,7 @@ import os
 import time
 import datetime
 import sys
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
@@ -102,8 +103,14 @@ def main():
     parser.add_argument('-n', '--name', type=str, default='default', help='Custom name for the output file')
     parser.add_argument('-c', '--count', type=int, default=1500, help='Number of ticks to generate')
     parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'mixed'], help='Pattern to use')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
     
     args = parser.parse_args()
+
+    # Set up logging
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    logging.info("Starting synthetic tick data generation")
 
     # If no arguments provided, use defaults
     if len(sys.argv) == 1:
@@ -112,16 +119,20 @@ def main():
         args.randomness = 0
         args.count = 14400000
         args.name = f"defaultmmss{mmss}"
+        logging.info(f"No arguments provided, using defaults: randomness={args.randomness}, count={args.count}, name={args.name}")
 
     randomness = Randomness(args.randomness)
     gen = TickGenerator(randomness=randomness)
     
+    logging.info(f"Generating {args.count} ticks with pattern '{args.pattern}' and randomness {args.randomness}")
+
     if args.pattern == 'mixed':
         # Generate mixed patterns like scenario 4
         ticks = []
         patterns = [gen.trend_pattern, gen.mean_reversion_pattern, gen.reversal_pattern]
         segment_ticks = args.count // len(patterns)
-        for pattern in patterns:
+        for i, pattern in enumerate(patterns):
+            logging.debug(f"Generating segment {i+1} with {segment_ticks} ticks")
             segment = gen.generate_ticks(segment_ticks, pattern)
             ticks.append(segment)
         all_ticks = np.vstack(ticks)
@@ -135,6 +146,8 @@ def main():
         mid_prices = pattern_map[args.pattern]()
         all_ticks = np.column_stack([mid_prices - gen.spread/2, mid_prices + gen.spread/2])
 
+    logging.info(f"Generated {len(all_ticks)} ticks")
+
     # Add timestamps
     start_time = int(time.time() * 1000)
     times = np.arange(len(all_ticks)) * 100 + start_time  # 100ms intervals
@@ -145,11 +158,13 @@ def main():
 
     # Save to CSV
     filename = f'data/synth/{args.name}.csv'
+    logging.info(f"Saving {len(all_ticks)} ticks to {filename}")
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['time_msc', 'bid', 'ask'])
         writer.writerows(all_ticks)
-    
+
+    logging.info("Data generation and saving completed")
     print(f"Generated {len(all_ticks)} ticks and saved to {filename}")
 
 if __name__ == '__main__':
