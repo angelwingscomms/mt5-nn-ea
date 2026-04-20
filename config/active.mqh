@@ -1,7 +1,7 @@
 // Default reusable XAUUSD preset.
 
 #define ARCHITECTURE_CONFIG "symbols/xauusd/config/gold.config"
-#define DATA_FILE "data/XAUUSD/ticks.csv"
+#define DATA_FILE "data/gold.csv"
 #define MODEL_NAME "xau-default"
 #define SYMBOL "XAUUSD"
 
