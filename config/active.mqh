@@ -1,5 +1,4 @@
 // Default reusable XAUUSD preset.
-// Copy this into the repo-root `config.mqh` when you want to train it directly.
 
 #define ARCHITECTURE_CONFIG "symbols/xauusd/config/gold.config"
 #define DATA_FILE "data/XAUUSD/ticks.csv"
