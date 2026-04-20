@@ -17,23 +17,57 @@ class TickGenerator:
     base_price: float = 100.0
     spread: float = 0.1  # bid-ask spread
     spread_variance: float = 0.0  # variance in spread (0 = fixed spread)
-    randomness: float = 5.0  # any positive float: multiplier for noise (unbounded)
-    volatility: float = 0.5  # affects noise magnitude
+    randomness: float = 5.0  # integer levels 0,1,2,... control noise ratio
+    volatility: float = 0.5  # base noise magnitude before scaling
     
-    def _get_noise(self, num_ticks: int) -> np.ndarray:
-        """Noise scaled by randomness level"""
-        if self.randomness == 0:
+    def _noise_ratio(self) -> float:
+        """Convert randomness level to noise ratio (0=pattern only, 1=noise only)
+        0 -> 0.0 (pure pattern)
+        1 -> 0.05 (5% noise, 95% pattern - very obvious pattern)
+        2 -> 0.10 (10% noise)
+        3 -> 0.14 (14% noise)
+        5 -> 0.23 (23% noise)
+        10 -> 0.40 (40% noise)
+        20 -> 0.57 (57% noise)
+        50 -> 0.80 (80% noise - mostly random)
+        100 -> 0.92 (92% noise - almost pure chaos)
+        """
+        if self.randomness <= 0:
+            return 0.0
+        return 1.0 - np.exp(-self.randomness / 10.0)
+    
+    def _get_noise(self, num_ticks: int, pattern_scale: float = 1.0) -> np.ndarray:
+        """Generate noise scaled by randomness level
+        
+        pattern_scale: expected range of the underlying pattern (for proper scaling)
+        At randomness=0: returns zeros (pure pattern)
+        At higher levels: noise progressively dominates
+        """
+        ratio = self._noise_ratio()
+        if ratio <= 0:
             return np.zeros(num_ticks)
         
+        if ratio >= 1.0:
+            return np.random.normal(0, self.volatility * pattern_scale, num_ticks)
+        
         noise = np.random.normal(0, self.volatility, num_ticks)
-        return noise * self.randomness
+        noise_magnitude = (ratio / (1.0 - ratio + 1e-10)) * self.volatility * pattern_scale
+        return noise * noise_magnitude / self.volatility
+    
+    def _get_noise_raw(self, num_ticks: int) -> np.ndarray:
+        """Raw noise without scaling - for random walk"""
+        ratio = self._noise_ratio()
+        if ratio <= 0:
+            return np.zeros(num_ticks)
+        return np.random.normal(0, self.volatility, num_ticks)
     
     def trend_pattern(self, num_ticks: int, direction: float = 1.0) -> np.ndarray:
         """Linear trend + noise
         direction: 1.0 = up, -1.0 = down, 0.5 = weak up
         """
+        pattern_scale = 2.0 + abs(direction)
         trend = np.linspace(0, direction * 2.0, num_ticks)
-        noise = self._get_noise(num_ticks)
+        noise = self._get_noise(num_ticks, pattern_scale)
         return self.base_price + trend + noise
     
     def mean_reversion_pattern(self, num_ticks: int, mean: Optional[float] = None) -> np.ndarray:
@@ -41,10 +75,17 @@ class TickGenerator:
         if mean is None:
             mean = self.base_price
         
+        ratio = self._noise_ratio()
+        pattern_scale = 1.0
+        
         prices = np.full(num_ticks, mean)
         for i in range(1, num_ticks):
             reversion = 0.3 * (mean - prices[i-1])
-            noise = np.random.normal(0, self.volatility) * self.randomness
+            if ratio > 0:
+                noise_scale = (ratio / (1.0 - ratio + 1e-10)) * self.volatility * pattern_scale
+                noise = np.random.normal(0, self.volatility) * (noise_scale / self.volatility)
+            else:
+                noise = 0.0
             prices[i] = prices[i-1] + reversion + noise
         
         return prices
@@ -53,13 +94,14 @@ class TickGenerator:
         """Reversal: up then down (or vice versa)
         pivot_point: where (0-1) the reversal happens
         """
+        pattern_scale = 3.0
         pivot_idx = int(num_ticks * pivot_point)
         
         up_trend = np.linspace(0, 3.0, pivot_idx)
         down_trend = np.linspace(3.0, 0, num_ticks - pivot_idx)
         
         trend = np.concatenate([up_trend, down_trend])
-        noise = self._get_noise(num_ticks)
+        noise = self._get_noise(num_ticks, pattern_scale)
         return self.base_price + trend + noise
     
     def multi_scale_oscillation(self, num_ticks: int, frequencies: Optional[List[float]] = None) -> np.ndarray:
@@ -75,16 +117,26 @@ class TickGenerator:
         for freq in frequencies:
             price = price + np.sin(2 * np.pi * freq * t) * (2.0 / len(frequencies))
         
-        noise = self._get_noise(num_ticks)
+        pattern_scale = 2.0
+        noise = self._get_noise(num_ticks, pattern_scale)
         return price + noise
     
     def random_walk(self, num_ticks: int) -> np.ndarray:
-        """Pure random walk - no pattern, just chaos. Hardest mode.
-        Each step is random, no underlying trend or structure.
+        """Pure random walk - randomness controls pure chaos vs controlled walk
+        
+        randomness level affects step distribution:
+        0 -> constant price (no movement)
+        1 -> very small steps (barely visible randomness)
+        50+ -> large random steps
         """
+        ratio = self._noise_ratio()
         prices = [self.base_price]
+        
         for _ in range(num_ticks - 1):
-            step = np.random.normal(0, self.volatility) * self.randomness
+            if ratio > 0:
+                step = self._get_noise_raw(1)[0] * (ratio * 10.0 if ratio < 1.0 else ratio * 20.0)
+            else:
+                step = 0.0
             prices.append(prices[-1] + step)
         return np.array(prices)
 
@@ -106,7 +158,7 @@ class TickGenerator:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic tick data")
-    parser.add_argument('-r', '--randomness', type=float, default=5.0, help='Randomness multiplier (any positive float, >100 warning)')
+    parser.add_argument('-r', '--randomness', type=float, default=5.0, help='Randomness level (0=pure pattern, 1=barely random, higher=more chaos)')
     parser.add_argument('-n', '--name', type=str, default='', help='Custom name for the output file')
     parser.add_argument('-c', '--count', type=int, default=540000, help='Number of ticks to generate')
     parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'random', 'mixed'], help='Pattern to use')
