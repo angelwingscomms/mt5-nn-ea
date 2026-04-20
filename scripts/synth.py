@@ -8,16 +8,7 @@ import datetime
 import sys
 import logging
 from dataclasses import dataclass
-from enum import Enum
-from typing import Callable
-
-class Randomness(Enum):
-    """Randomness levels: 0=deterministic, 10=pure random"""
-    NONE = 0
-    LOW = 2
-    MEDIUM = 5
-    HIGH = 8
-    CHAOS = 10
+from typing import Callable, Optional
 
 @dataclass
 class TickGenerator:
@@ -25,16 +16,16 @@ class TickGenerator:
     
     base_price: float = 100.0
     spread: float = 0.1  # bid-ask spread
-    randomness: Randomness = Randomness.MEDIUM
+    randomness: float = 5.0  # any positive float: multiplier for noise (unbounded)
     volatility: float = 0.5  # affects noise magnitude
     
     def _get_noise(self, num_ticks: int) -> np.ndarray:
         """Noise scaled by randomness level"""
-        if self.randomness.value == 0:
+        if self.randomness == 0:
             return np.zeros(num_ticks)
         
         noise = np.random.normal(0, self.volatility, num_ticks)
-        return noise * (self.randomness.value / 10.0)
+        return noise * self.randomness
     
     def trend_pattern(self, num_ticks: int, direction: float = 1.0) -> np.ndarray:
         """Linear trend + noise
@@ -44,17 +35,16 @@ class TickGenerator:
         noise = self._get_noise(num_ticks)
         return self.base_price + trend + noise
     
-    def mean_reversion_pattern(self, num_ticks: int, mean: float = None) -> np.ndarray:
+    def mean_reversion_pattern(self, num_ticks: int, mean: Optional[float] = None) -> np.ndarray:
         """Oscillates around mean, real-world-like"""
         if mean is None:
             mean = self.base_price
         
         prices = [mean]
         for _ in range(num_ticks - 1):
-            # Pull toward mean 30% + random walk
             reversion = 0.3 * (mean - prices[-1])
             random_step = np.random.normal(0, self.volatility)
-            noise = random_step * (self.randomness.value / 10.0)
+            noise = random_step * self.randomness
             prices.append(prices[-1] + reversion + noise)
         
         return np.array(prices)
@@ -72,7 +62,7 @@ class TickGenerator:
         noise = self._get_noise(num_ticks)
         return self.base_price + trend + noise
     
-    def multi_scale_oscillation(self, num_ticks: int, frequencies: list[float] = None) -> np.ndarray:
+    def multi_scale_oscillation(self, num_ticks: int, frequencies: Optional[list[float]] = None) -> np.ndarray:
         """Multiple sine waves at different scales (realistic complexity)
         frequencies: list of oscillation frequencies
         """
@@ -99,7 +89,7 @@ class TickGenerator:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic tick data")
-    parser.add_argument('-r', '--randomness', type=int, default=5, choices=range(11), help='Randomness level (0-10)')
+    parser.add_argument('-r', '--randomness', type=float, default=5.0, help='Randomness multiplier (any positive float, >100 warning)')
     parser.add_argument('-n', '--name', type=str, default='default', help='Custom name for the output file')
     parser.add_argument('-c', '--count', type=int, default=1500, help='Number of ticks to generate')
     parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'mixed'], help='Pattern to use')
@@ -120,8 +110,10 @@ def main():
         args.name = f"d{mmss}"
         logging.info(f"No arguments provided, using defaults: randomness={args.randomness}, count={args.count}, name={args.name}")
 
-    randomness = Randomness(args.randomness)
-    gen = TickGenerator(randomness=randomness)
+    gen = TickGenerator(randomness=args.randomness)
+    
+    if args.randomness > 100:
+        logging.warning(f"EXTREME RANDOMNESS: {args.randomness}x - data will be highly chaotic")
     
     logging.info(f"Generating {args.count} ticks with pattern '{args.pattern}' and randomness {args.randomness}")
 
