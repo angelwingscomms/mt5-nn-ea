@@ -77,6 +77,16 @@ class TickGenerator:
         
         noise = self._get_noise(num_ticks)
         return price + noise
+    
+    def random_walk(self, num_ticks: int) -> np.ndarray:
+        """Pure random walk - no pattern, just chaos. Hardest mode.
+        Each step is random, no underlying trend or structure.
+        """
+        prices = [self.base_price]
+        for _ in range(num_ticks - 1):
+            step = np.random.normal(0, self.volatility) * self.randomness
+            prices.append(prices[-1] + step)
+        return np.array(prices)
 
     def generate_ticks(self, num_ticks: int, pattern_fn: Callable) -> np.ndarray:
         """Generate bid/ask prices from pattern function"""
@@ -92,7 +102,7 @@ def main():
     parser.add_argument('-r', '--randomness', type=float, default=5.0, help='Randomness multiplier (any positive float, >100 warning)')
     parser.add_argument('-n', '--name', type=str, default='default', help='Custom name for the output file')
     parser.add_argument('-c', '--count', type=int, default=1500, help='Number of ticks to generate')
-    parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'mixed'], help='Pattern to use')
+    parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'random', 'mixed'], help='Pattern to use')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
     
     args = parser.parse_args()
@@ -120,7 +130,7 @@ def main():
     if args.pattern == 'mixed':
         # Generate mixed patterns like scenario 4
         ticks = []
-        patterns = [gen.trend_pattern, gen.mean_reversion_pattern, gen.reversal_pattern, gen.multi_scale_oscillation]
+        patterns = [gen.trend_pattern, gen.mean_reversion_pattern, gen.reversal_pattern, gen.multi_scale_oscillation, gen.random_walk]
         segment_ticks = args.count // len(patterns)
         for i, pattern in enumerate(patterns):
             logging.debug(f"Generating segment {i+1} with {segment_ticks} ticks")
@@ -132,7 +142,8 @@ def main():
             'trend': lambda: gen.trend_pattern(args.count),
             'mean_reversion': lambda: gen.mean_reversion_pattern(args.count),
             'reversal': lambda: gen.reversal_pattern(args.count),
-            'oscillation': lambda: gen.multi_scale_oscillation(args.count)
+            'oscillation': lambda: gen.multi_scale_oscillation(args.count),
+            'random': lambda: gen.random_walk(args.count)
         }
         mid_prices = pattern_map[args.pattern]()
         all_ticks = np.column_stack([mid_prices - gen.spread/2, mid_prices + gen.spread/2])
