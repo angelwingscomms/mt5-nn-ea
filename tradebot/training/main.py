@@ -18,7 +18,7 @@ def _on_ctrl_k():
     log.warning("CTRL+K pressed - stopping after current epoch...")
 
 
-# keyboard.add_hotkey("ctrl+k", _on_ctrl_k)  # commented out for testing without root
+keyboard.add_hotkey("ctrl+i", _on_ctrl_k)
 
 
 def main() -> None:
