@@ -137,5 +137,5 @@ def main():
     print(f"Generated {len(all_ticks)} ticks and saved to {filename}")
 
 if __name__ == '__main__':
-    main()</content>
+    main()
 <parameter name="filePath">synth_ticks.py
