@@ -27,6 +27,8 @@ def _override_from_argv() -> None:
     args, _ = parser.parse_known_args()
     if args.config:
         config_path = ROOT_DIR / "config" / args.config
+        if not config_path.suffix and not config_path.exists() and (config_path.parent / f"{config_path.name}.config").exists():
+            config_path = config_path.parent / f"{config_path.name}.config"
         if config_path.exists():
             set_override_config_path(config_path)
         else:
