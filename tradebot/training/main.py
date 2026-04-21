@@ -1197,9 +1197,10 @@ def main() -> None:
         flip=flip,
     )
     if not archive_only:
-        import subprocess
-        subprocess.run(['rm', '-rf', str(ACTIVE_DIAGNOSTICS_DIR)], capture_output=True)
-        shutil.copytree(diagnostics_dir, ACTIVE_DIAGNOSTICS_DIR)
+        try:
+            shutil.copytree(diagnostics_dir, ACTIVE_DIAGNOSTICS_DIR, dirs_exist_ok=True)
+        except Exception as e:
+            log.warning("Could not update diagnostics directory: %s", e)
     ensure_default_test_config(model_test_dir, symbol=SYMBOL)
 
     set_live_model_reference(model_dir)
