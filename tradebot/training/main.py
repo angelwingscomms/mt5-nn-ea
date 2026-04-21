@@ -775,10 +775,10 @@ def main() -> None:
                     training_model = TKAN(
                         n_features=feature_count,
                         n_classes=len(active_label_names),
-                        lstm_hidden=64,
-                        lstm_layers=2,
-                        n_heads=4,
-                        proj_dim=512,
+                        lstm_hidden=args.sequence_hidden_size,
+                        lstm_layers=args.sequence_layers,
+                        n_heads=args.attention_heads,
+                        proj_dim=args.kan_proj_dim,
                         dropout=args.sequence_dropout,
                         l1_lambda=args.l1_lambda,
                     ).to(device)

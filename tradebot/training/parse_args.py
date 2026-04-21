@@ -61,6 +61,7 @@ def parse_args() -> argparse.Namespace:
         sequence_layers=int(values.get("SEQUENCE_LAYERS", DEFAULT_SEQUENCE_LAYERS)),
         sequence_dropout=float(values.get("SEQUENCE_DROPOUT", DEFAULT_SEQUENCE_DROPOUT)),
         l1_lambda=float(values.get("L1_LAMBDA", DEFAULT_L1_LAMBDA)),
+        kan_proj_dim=int(values.get("KAN_PROJ_DIM", DEFAULT_KAN_PROJ_DIM)),
         tcn_levels=int(values.get("TCN_LEVELS", DEFAULT_TCN_LEVELS)),
         tcn_kernel_size=int(values.get("TCN_KERNEL_SIZE", DEFAULT_TCN_KERNEL_SIZE)),
         metaeditor_path=str(values.get("METAEDITOR_PATH", "")).strip(),
