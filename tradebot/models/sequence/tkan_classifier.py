@@ -1,66 +1,72 @@
-
 from __future__ import annotations
 
 import torch
-from torch import nn
-
+import torch.nn as nn
+import torch.nn.functional as F
 from efficient_kan import KANLinear
-from tradebot.models.sequence.sequence_instance_norm import SequenceInstanceNorm
 
 
 class ScalperMicrostructureClassifier(nn.Module):
     def __init__(
         self,
         n_features: int,
-        channels: int = 64,
-        hidden: int = 64,
-        dense_hidden: int = 48,
         n_classes: int = 3,
-        attention_heads: int = 2,
-        attention_dropout: float = 0.1,
-        dropout: float = 0.3,
+        lstm_hidden: int = 64,
+        lstm_layers: int = 2,
+        n_heads: int = 4,
+        proj_dim: int = 512,
+        dropout: float = 0.2,
+        l1_lambda: float = 1e-4,
     ):
         super().__init__()
-        self.sequence_norm = SequenceInstanceNorm(n_features)
+        self.l1_lambda = l1_lambda
 
         self.encoder = nn.LSTM(
-            n_features,
-            64,
-            num_layers=2,
+            input_size=n_features,
+            hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
             batch_first=True,
             bidirectional=True,
-            dropout=dropout,
+            dropout=dropout if lstm_layers > 1 else 0,
         )
-        latent_dim = 256
+        lstm_out_dim = lstm_hidden * 2
 
-        classifier_in_dim = latent_dim + n_features
-        self.dense_shared = nn.Sequential(
-            KANLinear(classifier_in_dim, dense_hidden),
+        self.attention = nn.MultiheadAttention(
+            embed_dim=lstm_out_dim,
+            num_heads=n_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.attn_norm = nn.LayerNorm(lstm_out_dim)
+
+        self.latent_proj = nn.Linear(lstm_out_dim, 256)
+        self.latent_norm = nn.LayerNorm(256)
+
+        self.head = nn.Sequential(
+            KANLinear(256, proj_dim, grid_size=5, spline_order=3),
             nn.SiLU(),
             nn.Dropout(dropout),
+            KANLinear(proj_dim, n_classes, grid_size=5, spline_order=3),
         )
-        self.state_branch = KANLinear(dense_hidden, 1)
-        self.direction_branch = KANLinear(dense_hidden, n_classes)
-        self.l1_lambda = 1e-4
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        normed = self.sequence_norm(x)
-        _, (h_n, _) = self.encoder(normed)
-        latent = h_n.permute(1, 0, 2).reshape(x.size(0), -1)
-        final_vector = torch.cat([latent, x[:, -1, :]], dim=1)
+        lstm_out, _ = self.encoder(x)
 
-        shared = self.dense_shared(final_vector)
-        state_val = self.state_branch(shared)
-        direction_val = self.direction_branch(shared)
+        attn_out, _ = self.attention(lstm_out, lstm_out)
+        attn_out = self.attn_norm(attn_out + lstm_out)
 
-        if direction_val.shape[1] > 1:
-            return state_val + (direction_val - direction_val.mean(1, keepdim=True))
-        return direction_val
+        pooled = attn_out.mean(dim=1)
 
-    def l1_sparsity_penalty(self) -> torch.Tensor:
-        return self.l1_lambda * sum(
-            p.abs().sum()
-            for m in self.modules()
-            if isinstance(m, KANLinear)
-            for p in m.parameters()
-        )
+        latent = self.latent_proj(pooled)
+        latent = self.latent_norm(latent)
+
+        return self.head(latent)
+
+    def l1_sparsity_penalty(self):
+        l1 = 0.0
+        for m in self.modules():
+            if isinstance(m, KANLinear):
+                for p in m.parameters():
+                    if p.requires_grad:
+                        l1 = l1 + p.abs().sum()
+        return self.l1_lambda * l1
