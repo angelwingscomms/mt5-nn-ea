@@ -31,14 +31,19 @@ def build_mql_config(
     warmup_bars: int,
     flip: bool = False,
 ) -> str:
-    base_text = project.config_path.read_text(encoding="utf-8").rstrip()
+    from tradebot.config_io import load_define_file, render_define_value as render_val
+    if project.config_path.is_dir():
+        base_values = load_define_file(project.config_path)
+        base_text = "\n".join(f"#define {k} {render_val(v)}" for k, v in sorted(base_values.items()))
+    else:
+        base_text = project.config_path.read_text(encoding="utf-8").rstrip()
 
     def override_define(name: str, value: bool | int | float | str) -> list[str]:
         return [
             f"#ifdef {name}",
             f"#undef {name}",
             "#endif",
-            f"#define {name} {render_define_value(value)}",
+            f"#define {name} {render_val(value)}",
         ]
 
     override_lines: list[str] = [

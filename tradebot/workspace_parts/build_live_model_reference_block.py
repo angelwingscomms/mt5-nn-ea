@@ -23,7 +23,7 @@ def build_live_model_reference_block(model_dir: Path) -> str:
             f'#define ACTIVE_MODEL_SYMBOL "{symbol_value}"',
             f'#define ACTIVE_MODEL_VERSION "{version}"',
             f'#include "../{include_dir}/{MODEL_CONFIG_NAME}"',
-            f'#resource "..\\{resource_literal}" as uchar model_buffer[]',
+            f'#resource "\\\\Experts\\\\9\\\\{resource_literal}" as uchar model_buffer[]',
             LIVE_MODEL_BLOCK_END,
         ]
     )

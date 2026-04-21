@@ -2,6 +2,6 @@
 #define LABEL_TIMEOUT_BARS 9
 #define LABEL_SL_MULTIPLIER 1.0
 #define LABEL_TP_MULTIPLIER 1.2
-#define SEQ_LEN 27
+#define SEQ_LEN 9
 #define TARGET_ATR_PERIOD 9
 #define USE_FIXED_TARGETS true
