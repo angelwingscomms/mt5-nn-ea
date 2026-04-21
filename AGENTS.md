@@ -1,4 +1,7 @@
 be minimalist
+
+always activate the virtual environment in ./env before trying to run any python, never create a new virtualenv
+
 whenever running scripts/nn.py, always use -c testrun.config flag, e.g. python scripts/nn.py -c testrun.config
 
 always speak in an extremely concise manner to the user and always explain stuff to the user like i'm 9 years old
