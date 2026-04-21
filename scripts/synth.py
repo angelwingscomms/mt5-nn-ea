@@ -14,21 +14,10 @@ from typing import List, Optional
 
 @dataclass
 class HFTStressTestGenerator:
-    """HFT Stress Test Generator using Signal-to-Noise Ratio approach.
-    
-    Blends deterministic signal (timeframe patterns) with stochastic noise
-    (Brownian motion + Jump-Diffusion) to control how much alpha is available.
-    """
-    
     initial_price: float = 100.0
     base_spread: float = 0.01
-    mu: float = 0.5
-    alpha: float = 0.3
-    beta: float = 1.0
-    volatility: float = 0.0005
-    
+
     def _generate_pattern(self, t_array: np.ndarray, pattern_timeframes: List[float]) -> np.ndarray:
-        """Creates a deterministic signal based on specific timeframes (in seconds)."""
         signal = np.zeros_like(t_array)
         if not pattern_timeframes:
             return signal
@@ -36,75 +25,49 @@ class HFTStressTestGenerator:
         for tf in pattern_timeframes:
             signal += np.sin(2 * np.pi * t_array / tf)
         
-        return signal * 0.001
-    
-    def _generate_hawkes_timestamps(self, duration_secs: float) -> np.ndarray:
-        """Generate timestamps using Hawkes Process for realistic tick clustering."""
+        return signal * 0.001 
+
+    def simulate(self,
+               duration_secs: float = 600,
+               randomness_intensity: float = 0.5,
+               pattern_timeframes: Optional[List[float]] = None,
+               mu: float = 0.5,
+               alpha: float = 0.3,
+               beta: float = 1.0,
+               volatility: float = 0.0005) -> pd.DataFrame:
         timestamps = []
-        t = 0.0
+        t = 0
         while t < duration_secs:
-            lambda_bar = self.mu + sum([
-                self.alpha * np.exp(-self.beta * (t - ti)) 
-                for ti in timestamps if t > ti
-            ]) + self.alpha
+            lambda_bar = mu + sum([alpha * np.exp(-beta * (t - ti)) for ti in timestamps if t > ti]) + alpha
             U = np.random.uniform(0, 1)
             t += -np.log(U) / lambda_bar
-            if t >= duration_secs:
-                break
+            if t >= duration_secs: break
             
-            current_lambda = self.mu + sum([
-                self.alpha * np.exp(-self.beta * (t - ti)) 
-                for ti in timestamps
-            ])
+            current_lambda = mu + sum([alpha * np.exp(-beta * (t - ti)) for ti in timestamps])
             if np.random.uniform(0, 1) < (current_lambda / lambda_bar):
                 timestamps.append(t)
         
-        return np.array(timestamps)
-    
-    def simulate(
-        self,
-        duration_secs: float = 600,
-        randomness_intensity: float = 0.5,
-        pattern_timeframes: Optional[List[float]] = None,
-    ) -> pd.DataFrame:
-        """Generate HFT stress test data.
-        
-        Args:
-            duration_secs: Duration of simulation in seconds
-            randomness_intensity: 0 = Pure Pattern, 1 = Pure Chaos
-            pattern_timeframes: List of timeframe periods in seconds (e.g., [9, 54])
-        
-        Returns:
-            DataFrame with timestamp, seconds, last, bid, ask columns
-        """
-        if pattern_timeframes is None:
-            pattern_timeframes = [9, 54]
-        
-        t_array = self._generate_hawkes_timestamps(duration_secs)
+        t_array = np.array(timestamps)
         num_ticks = len(t_array)
         
-        if num_ticks == 0:
-            return pd.DataFrame(columns=['timestamp', 'seconds', 'last', 'bid', 'ask'])
+        if pattern_timeframes is None:
+            pattern_timeframes = [9, 54]
         
         signal_component = self._generate_pattern(t_array, pattern_timeframes)
         
         dt = np.diff(np.insert(t_array, 0, 0))
         z = np.random.normal(0, 1, num_ticks)
-        stochastic_path = np.cumsum(self.volatility * np.sqrt(dt) * z)
+        
+        stochastic_path = np.cumsum(volatility * np.sqrt(dt) * z)
         
         combined_returns = ((1 - randomness_intensity) * signal_component) + \
-                         (randomness_intensity * stochastic_path)
+                           (randomness_intensity * stochastic_path)
         
         prices = self.initial_price * (1 + combined_returns)
         
-        intensities = np.array([
-            self.mu + sum([
-                self.alpha * np.exp(-self.beta * (t - ti)) 
-                for ti in t_array if t > ti
-            ]) for t in t_array
-        ])
-        spreads = self.base_spread * (1 + (intensities / self.mu) * randomness_intensity)
-        
+        intensities = np.array([mu + sum([alpha * np.exp(-beta * (t - ti)) for ti in timestamps if t > ti]) for t in t_array])
+        spreads = self.base_spread * (1 + (intensities / mu) * randomness_intensity)
+
         start_time = datetime.datetime.now()
         df = pd.DataFrame({
             'timestamp': [start_time + datetime.timedelta(seconds=ts) for ts in t_array],
@@ -117,7 +80,6 @@ class HFTStressTestGenerator:
 
 
 def get_stats(df: pd.DataFrame, name: str) -> None:
-    """Print statistics for generated data."""
     print(f"--- {name} ---")
     print(f"Tick Count: {len(df)}")
     print(f"Avg Spread: {(df['ask'] - df['bid']).mean():.5f}")
@@ -125,7 +87,6 @@ def get_stats(df: pd.DataFrame, name: str) -> None:
 
 
 def parse_timeframes(timeframe_str: str) -> List[float]:
-    """Parse comma-separated timeframe string into list of floats."""
     if not timeframe_str:
         return []
     return [float(x.strip()) for x in timeframe_str.split(',') if x.strip()]
@@ -276,11 +237,7 @@ def main():
     
     gen = HFTStressTestGenerator(
         initial_price=args.initial_price,
-        base_spread=args.spread,
-        mu=args.mu,
-        alpha=args.alpha,
-        beta=args.beta,
-        volatility=args.volatility
+        base_spread=args.spread
     )
     
     if args.ticks:
@@ -293,7 +250,11 @@ def main():
     df = gen.simulate(
         duration_secs=args.duration,
         randomness_intensity=args.randomness_intensity,
-        pattern_timeframes=pattern_timeframes
+        pattern_timeframes=pattern_timeframes,
+        mu=args.mu,
+        alpha=args.alpha,
+        beta=args.beta,
+        volatility=args.volatility
     )
     
     if args.ticks and len(df) != args.ticks:
