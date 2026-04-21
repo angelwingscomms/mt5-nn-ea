@@ -7,7 +7,7 @@
 // =============================================================================
 
 #define MODEL_ARCHITECTURE "au"
-#define DATA_FILE "data/XAUUSD/ticks.testrun.csv"
+#define DATA_FILE "data/synth/synth_0.csv"
 #define MODEL_NAME "au-54s-scalp"
 #define SYMBOL "XAUUSD"
 
