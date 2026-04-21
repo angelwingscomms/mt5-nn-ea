@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from efficient_kan import KANLinear
 
 
-class ScalperMicrostructureClassifier(nn.Module):
+class TKAN(nn.Module):
     def __init__(
         self,
         n_features: int,

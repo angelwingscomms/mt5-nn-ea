@@ -39,6 +39,7 @@ from tradebot.models.sequence import (
     ScalperMicrostructureClassifier,
     TCNClassifier,
     TemporalLSTMAttentionClassifier,
+    TKAN,
 )
 from tradebot.pipeline.diagnostics import DiagnosticsConfig
 from tradebot.pipeline.diagnostics import write_diagnostics as write_diagnostics_report
@@ -156,6 +157,7 @@ DEFAULT_SEQUENCE_LAYERS = 2
 DEFAULT_SEQUENCE_DROPOUT = 0.1
 DEFAULT_TCN_LEVELS = 3
 DEFAULT_TCN_KERNEL_SIZE = 3
+DEFAULT_L1_LAMBDA = 1e-4
 DEFAULT_CONFIDENCE_SEARCH_MIN = 0.40
 DEFAULT_CONFIDENCE_SEARCH_MAX = 0.99
 DEFAULT_CONFIDENCE_SEARCH_STEPS = 60

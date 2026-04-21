@@ -26,6 +26,8 @@ def resolve_architecture(args: argparse.Namespace) -> str:
         return "tcn"
     if args.use_tla_encoder:
         return "tla"
+    if args.use_tkan_encoder:
+        return "tkan"
     if args.use_minirocket_encoder:
         return "minirocket"
     if args.use_castor_encoder:

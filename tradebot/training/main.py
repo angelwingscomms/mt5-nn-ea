@@ -771,6 +771,17 @@ def main() -> None:
                         attention_dropout=args.attention_dropout,
                         dropout=args.sequence_dropout,
                     ).to(device)
+                elif architecture == "tkan":
+                    training_model = TKAN(
+                        n_features=feature_count,
+                        n_classes=len(active_label_names),
+                        lstm_hidden=64,
+                        lstm_layers=2,
+                        n_heads=4,
+                        proj_dim=512,
+                        dropout=args.sequence_dropout,
+                        l1_lambda=args.l1_lambda,
+                    ).to(device)
                 elif architecture == "fusion_lstm":
                     training_model = FusionLSTMClassifier(
                         n_features=feature_count,

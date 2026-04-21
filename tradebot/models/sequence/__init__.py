@@ -18,6 +18,7 @@ from tradebot.models.sequence.temporal_attention_pooling import TemporalAttentio
 from tradebot.models.sequence.temporal_conv_block import TemporalConvBlock
 from tradebot.models.sequence.temporal_lstm_attention_classifier import TemporalLSTMAttentionClassifier
 from tradebot.models.sequence.i9 import ScalperMicrostructureClassifier
+from tradebot.models.sequence.tkan_classifier import TKAN
 
 __all__ = [
     'AuLSTMMultiheadAttentionClassifier',
@@ -37,5 +38,6 @@ __all__ = [
     'TCNClassifier',
     'TemporalConvBlock',
     'ScalperMicrostructureClassifier',
+    'TKAN',
     'TemporalLSTMAttentionClassifier',
 ]
