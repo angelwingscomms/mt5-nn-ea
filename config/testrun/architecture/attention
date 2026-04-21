@@ -1,0 +1,5 @@
+#define ATTENTION_DIM 256
+#define ATTENTION_DROPOUT 0.00
+#define ATTENTION_HEADS 4
+#define ATTENTION_LAYERS 1
+#define CHRONOS_BOLT_MODEL "amazon/chronos-bolt-tiny"

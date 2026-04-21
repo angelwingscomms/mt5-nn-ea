@@ -1,0 +1,12 @@
+#define DEVICE "cpu"
+#define MAX_BARS 512
+#define METAEDITOR_PATH ""
+#define SKIP_LIVE_COMPILE true
+#define TCN_KERNEL_SIZE 3
+#define TCN_LEVELS 4
+#define USE_ALL_WINDOWS true
+#define USE_CHRONOS_AUTO_CONTEXT false
+#define USE_CHRONOS_ENSEMBLE_CONTEXTS false
+#define USE_CHRONOS_PATCH_ALIGNED_CONTEXT false
+#define USE_MAX_BARS true
+#define USE_NO_HOLD false

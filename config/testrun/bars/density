@@ -1,0 +1,5 @@
+#define PRIMARY_BAR_SECONDS 54
+#define PRIMARY_TICK_DENSITY 203
+#define USE_FIXED_TIME_BARS true
+#define USE_FIXED_TICK_BARS false
+#define USE_SECOND_BARS true
