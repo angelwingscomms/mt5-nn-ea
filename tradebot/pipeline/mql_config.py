@@ -29,6 +29,7 @@ def build_mql_config(
     use_fixed_tick_bars: bool,
     max_feature_lookback: int,
     warmup_bars: int,
+    flip: bool = False,
 ) -> str:
     base_text = project.config_path.read_text(encoding="utf-8").rstrip()
 
@@ -67,6 +68,7 @@ def build_mql_config(
         ("MODEL_USE_CHRONOS", 1 if architecture == "chronos_bolt" else 0),
         ("MODEL_USE_CHRONOS_BOLT", 1 if architecture == "chronos_bolt" else 0),
         ("MODEL_USE_AU", 1 if architecture == "au" else 0),
+        ("FLIP", 1 if flip else 0),
     ):
         override_lines.extend(override_define(name, value))
     override_lines.extend(

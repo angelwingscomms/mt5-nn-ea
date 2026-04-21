@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
         primary_tick_density=int(values.get("PRIMARY_TICK_DENSITY", DEFAULT_PRIMARY_TICK_DENSITY)),
         use_extended_features=not bool(values.get("USE_MINIMAL_FEATURE_SET", False)),
         no_hold=bool(values.get("USE_NO_HOLD", False)),
+        flip=bool(values.get("FLIP", False)),
         config_architecture=project.architecture,
         gold=False,
         gold_new=False,

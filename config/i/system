@@ -1,4 +1,5 @@
 #define DEVICE "cpu"
+#define FLIP false
 #define MAX_BARS 0
 #define METAEDITOR_PATH ""
 #define SKIP_LIVE_COMPILE true

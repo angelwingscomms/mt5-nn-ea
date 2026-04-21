@@ -27,6 +27,14 @@ void Predict() {
    #endif
    Softmax(output_data, probs);
    int signal = ArrayMaximum(probs);
+   #ifdef FLIP
+      #ifdef USE_NO_HOLD
+         signal = 1 - signal;
+      #else
+         if(signal == 1) signal = 2;
+         else if(signal == 2) signal = 1;
+      #endif
+   #endif
    #ifdef USE_NO_HOLD
       DebugPrint(
          StringFormat(

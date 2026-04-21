@@ -15,6 +15,7 @@ def build_mql_config(
     feature_profile: str,
     use_extended_features: bool,
     use_fixed_tick_bars: bool,
+    flip: bool,
 ) -> str:
     base_text = project.config_path.read_text(encoding="utf-8").rstrip()
     def override_define(name: str, value: bool | int | float | str) -> list[str]:
@@ -50,6 +51,7 @@ def build_mql_config(
         ("MODEL_USE_LEGACY_LSTM_ATTENTION", 1 if architecture == "legacy_lstm_attention" else 0),
         ("MODEL_USE_CHRONOS", 1 if architecture == "chronos_bolt" else 0),
         ("MODEL_USE_CHRONOS_BOLT", 1 if architecture == "chronos_bolt" else 0),
+        ("FLIP", 1 if flip else 0),
     ):
         override_lines.extend(override_define(name, value))
     override_lines.extend(

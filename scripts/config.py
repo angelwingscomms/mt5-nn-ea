@@ -329,6 +329,7 @@ def parse_config_spec() -> ConfigCategory:
                     make_int("TCN_LEVELS", 4, "TCN levels"),
                     make_bool("USE_MULTIHEAD_ATTENTION", True, "Use multihead attention"),
                     make_bool("USE_NO_HOLD", False, "Use no-hold mode"),
+                    make_bool("FLIP", False, "Flip buy/sell signals"),
                 ],
             ),
             "Training": ConfigCategory(

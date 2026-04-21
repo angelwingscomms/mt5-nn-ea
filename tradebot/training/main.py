@@ -119,6 +119,7 @@ def main() -> None:
     use_fixed_time_bars = bool(args.use_fixed_time_bars)
     use_fixed_tick_bars = bool(args.use_fixed_tick_bars)
     use_no_hold = bool(args.no_hold)
+    flip = bool(args.flip)
     active_label_names = LABEL_NAMES_BINARY if use_no_hold else LABEL_NAMES
     if architecture == "chronos_bolt" and use_extended_features:
         log.warning(
@@ -897,6 +898,7 @@ def main() -> None:
         print(f"use_fixed_tick_bars = {use_fixed_tick_bars}")
         print(f"use_no_hold = {use_no_hold}")
         print(f"use_multihead_attention = {use_multihead_attention}")
+        print(f"flip = {flip}")
         print(f"active_label_names = {active_label_names}")
         print(f"feature_profile = {feature_profile}")
         print(f"feature_count = {feature_count}")
@@ -935,7 +937,15 @@ def main() -> None:
                 train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}", leave=False
             ):
                 logits = training_model(xb.to(device))
-                loss = criterion(logits, yb.to(device))
+                yb_flipped = yb
+                if flip:
+                    if use_no_hold:
+                        yb_flipped = 1 - yb
+                    else:
+                        yb_flipped = yb.clone()
+                        yb_flipped[yb == 1] = 2
+                        yb_flipped[yb == 2] = 1
+                loss = criterion(logits, yb_flipped.to(device))
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(training_model.parameters(), 1.0)
@@ -946,10 +956,18 @@ def main() -> None:
             val_logits, val_labels = run_model_evaluation(
                 training_model, val_loader, device
             )
+            val_labels_flipped = val_labels
+            if flip:
+                if use_no_hold:
+                    val_labels_flipped = 1 - val_labels
+                else:
+                    val_labels_flipped = val_labels.copy()
+                    val_labels_flipped[val_labels == 1] = 2
+                    val_labels_flipped[val_labels == 2] = 1
             val_loss = float(
                 criterion(
                     torch.tensor(val_logits, dtype=torch.float32, device=device),
-                    torch.tensor(val_labels, dtype=torch.long, device=device),
+                    torch.tensor(val_labels_flipped, dtype=torch.long, device=device),
                 ).item()
             )
             log.info(
@@ -1106,6 +1124,7 @@ def main() -> None:
             use_fixed_tick_bars=use_fixed_tick_bars,
             max_feature_lookback=MAX_FEATURE_LOOKBACK,
             warmup_bars=WARMUP_BARS,
+            flip=flip,
         )
         + "\n"
     )
@@ -1175,6 +1194,7 @@ def main() -> None:
         fixed_move_price=fixed_move_price,
         use_fixed_tick_bars=use_fixed_tick_bars,
         tick_density=args.primary_tick_density,
+        flip=flip,
     )
     if not archive_only:
         shutil.rmtree(ACTIVE_DIAGNOSTICS_DIR, ignore_errors=True)

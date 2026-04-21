@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from .shared import *  # noqa: F401,F403
 
-def build_prediction_frame(labels: np.ndarray, probs: np.ndarray, threshold: float) -> pd.DataFrame:
+def build_prediction_frame(labels: np.ndarray, probs: np.ndarray, threshold: float, flip: bool = False) -> pd.DataFrame:
     preds = probs.argmax(axis=1)
+    if flip:
+        if probs.shape[1] == 2:
+            preds = 1 - preds
+        else:
+            preds_flipped = preds.copy()
+            preds_flipped[preds == 1] = 2
+            preds_flipped[preds == 2] = 1
+            preds = preds_flipped
     confidences = probs.max(axis=1)
     if probs.shape[1] == 2:
         active_names = LABEL_NAMES_BINARY

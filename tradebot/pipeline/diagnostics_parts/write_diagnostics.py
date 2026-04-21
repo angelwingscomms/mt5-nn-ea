@@ -39,14 +39,15 @@ def write_diagnostics(
     fixed_move_price: float,
     use_fixed_tick_bars: bool,
     tick_density: int,
+    flip: bool = False,
 ) -> None:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
     val_predictions = build_prediction_frame(
-        y_val, val_probs, selected_primary_confidence, label_names
+        y_val, val_probs, selected_primary_confidence, label_names, flip
     )
     test_predictions = build_prediction_frame(
-        y_test, test_probs, selected_primary_confidence, label_names
+        y_test, test_probs, selected_primary_confidence, label_names, flip
     )
     val_confusion = confusion_matrix_df(
         y_val,
@@ -86,6 +87,7 @@ def write_diagnostics(
         "## Run",
         f"- symbol: {symbol}",
         f"- backend: {model_backend}",
+        f"- flip: {int(flip)}",
         f"- feature_profile: {feature_profile}",
         f"- feature_count: {len(feature_columns)}",
         f"- loss_mode: {loss_mode}",

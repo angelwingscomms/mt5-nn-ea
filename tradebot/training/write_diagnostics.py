@@ -32,12 +32,13 @@ def write_diagnostics(
     fixed_move_price: float,
     use_fixed_tick_bars: bool,
     tick_density: int,
+    flip: bool,
 ) -> None:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
     active_label_names = LABEL_NAMES_BINARY if val_probs.shape[1] == 2 else LABEL_NAMES
-    val_predictions = build_prediction_frame(y_val, val_probs, selected_primary_confidence)
-    test_predictions = build_prediction_frame(y_test, test_probs, selected_primary_confidence)
+    val_predictions = build_prediction_frame(y_val, val_probs, selected_primary_confidence, flip)
+    test_predictions = build_prediction_frame(y_test, test_probs, selected_primary_confidence, flip)
     val_confusion = confusion_matrix_df(
         y_val, val_predictions["pred_label"].to_numpy(dtype=np.int64), active_label_names
     )
