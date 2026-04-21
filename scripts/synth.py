@@ -144,6 +144,25 @@ class TickGenerator:
             prices.append(prices[-1] + step)
         return np.array(prices)
 
+    def timeframe_pattern(self, num_ticks: int, timeframe_sec: float, interval_ms: int = 111) -> np.ndarray:
+        """Pattern that repeats at specified timeframe interval
+        
+        timeframe_sec: interval in seconds for the recurring pattern (e.g., 9, 54, 3600)
+        interval_ms: time between ticks in milliseconds
+        """
+        ticks_per_timeframe = int((timeframe_sec * 1000) / interval_ms)
+        if ticks_per_timeframe < 1:
+            ticks_per_timeframe = 1
+        
+        pattern_scale = 2.0
+        t = np.arange(num_ticks)
+        
+        freq = 1.0 / ticks_per_timeframe
+        price = self.base_price + np.sin(2 * np.pi * freq * t) * 2.0
+        
+        noise = self._get_noise(num_ticks, pattern_scale)
+        return price + noise
+
     def generate_ticks(self, num_ticks: int, pattern_fn: Callable) -> np.ndarray:
         """Generate bid/ask prices from pattern function"""
         if self.randomness <= 0:
@@ -168,7 +187,8 @@ def main():
     parser.add_argument('-r', '--randomness', type=float, default=5.0, help='Randomness level (0=pure pattern, 1=barely random, higher=more chaos)')
     parser.add_argument('-n', '--name', type=str, default='', help='Custom name for the output file')
     parser.add_argument('-c', '--count', type=int, default=540000, help='Number of ticks to generate')
-    parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'random', 'mixed'], help='Pattern to use')
+    parser.add_argument('-p', '--pattern', type=str, default='mixed', choices=['trend', 'mean_reversion', 'reversal', 'oscillation', 'random', 'mixed', 'timeframe'], help='Pattern to use')
+    parser.add_argument('-t', '--timeframe', type=float, default=None, help='Timeframe in seconds for timeframe pattern (e.g., 9, 54, 3600)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging')
     parser.add_argument('-w', '--overwrite', action='store_true', help='Overwrite if file exists')
     parser.add_argument('-s', '--seed', type=int, default=None, help='Random seed for reproducibility')
@@ -236,8 +256,18 @@ def main():
     
     logging.info(f"Generating {args.count} ticks with pattern '{args.pattern}' and randomness {args.randomness}")
 
-    if args.pattern == 'mixed':
-        # Generate mixed patterns like scenario 4
+    if args.pattern == 'timeframe':
+        if args.timeframe is None:
+            logging.error("Timeframe pattern requires --timeframe argument")
+            print("ERROR: --timeframe is required when using 'timeframe' pattern")
+            sys.exit(1)
+        if args.timeframe <= 0:
+            logging.error(f"Timeframe must be > 0, got {args.timeframe}")
+            print(f"ERROR: Timeframe must be > 0, got {args.timeframe}")
+            sys.exit(1)
+        logging.info(f"Generating timeframe pattern with interval {args.timeframe} seconds")
+        all_ticks = gen.generate_ticks(args.count, lambda n: gen.timeframe_pattern(n, args.timeframe, args.interval))
+    elif args.pattern == 'mixed':
         ticks = []
         patterns = [gen.trend_pattern, gen.mean_reversion_pattern, gen.reversal_pattern, gen.multi_scale_oscillation, gen.random_walk]
         segment_ticks = args.count // len(patterns)
