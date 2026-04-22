@@ -1,5 +1,5 @@
 #define DEVICE "cpu"
-#define FLIP true
+#define FLIP false
 #define MAX_BARS 0
 #define METAEDITOR_PATH ""
 #define SKIP_LIVE_COMPILE true
@@ -11,4 +11,4 @@
 #define USE_CUSTOM_WEIGHT_DECAY false
 #define USE_MAX_BARS false
 #define USE_CONFIDENCE_THRESHOLD true
-#define USE_NO_HOLD true
+#define USE_NO_HOLD false

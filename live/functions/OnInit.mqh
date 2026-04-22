@@ -52,9 +52,11 @@ output_shape[0] = 1;
          PRIMARY_CONFIDENCE
       )
    );
+   #ifdef USE_CONFIDENCE_THRESHOLD
    if(PRIMARY_CONFIDENCE > 1.0) {
       Print("[INFO] Live trading disabled because the active model failed the trainer quality gate.");
    }
+   #endif
 
    MqlTick tick;
    if(SymbolInfoTick(_Symbol, tick)) {

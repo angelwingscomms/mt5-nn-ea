@@ -67,6 +67,7 @@ void Predict() {
          return;
       }
    #endif
+   #ifdef USE_CONFIDENCE_THRESHOLD
    if(probs[signal] < PRIMARY_CONFIDENCE) {
       confidence_skip_count++;
       DebugPrint(
@@ -78,6 +79,7 @@ void Predict() {
       );
       return;
    }
+   #endif
 
    Execute(signal);
 }

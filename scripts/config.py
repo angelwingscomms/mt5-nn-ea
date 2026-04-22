@@ -357,6 +357,7 @@ def parse_config_spec() -> ConfigCategory:
                     make_int("CONFIDENCE_SEARCH_STEPS", 60, "Confidence search steps"),
                     make_int("MIN_SELECTED_TRADES", 12, "Min selected trades"),
                     make_float("MIN_TRADE_PRECISION", 0.5, "Min trade precision"),
+                    make_bool("USE_CONFIDENCE_THRESHOLD", True, "Use confidence threshold"),
                 ],
             ),
             "Chronos": ConfigCategory(

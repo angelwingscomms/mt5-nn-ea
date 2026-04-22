@@ -115,7 +115,7 @@ def build_mql_config(
             base_text,
             *override_lines,
             *feature_macro_lines,
-            f"#define PRIMARY_CONFIDENCE {primary_confidence:.8f}",
+            f"#define PRIMARY_CONFIDENCE {max(0.0, primary_confidence):.8f}",
             f"float medians[MODEL_FEATURE_COUNT] = {{{format_float_array(median)}}};",
             f"float iqrs[MODEL_FEATURE_COUNT] = {{{format_float_array(iqr)}}};",
         ]

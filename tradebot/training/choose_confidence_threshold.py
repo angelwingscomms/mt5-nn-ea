@@ -9,7 +9,12 @@ def choose_confidence_threshold(
     threshold_min: float,
     threshold_max: float,
     threshold_steps: int,
+    use_confidence_threshold: bool = True,
 ) -> float:
+    if not use_confidence_threshold:
+        log.info("Confidence threshold disabled; using threshold_min=0.0")
+        return 0.0
+
     preds = probs.argmax(axis=1)
     confidences = probs.max(axis=1)
     is_binary = probs.shape[1] == 2

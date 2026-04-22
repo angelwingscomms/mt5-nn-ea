@@ -89,7 +89,7 @@ int warmup_count = 0;
 double warmup_sum_feature = 0.0;
 double warmup_sum_trade = 0.0;
 float input_data[INPUT_BUFFER_SIZE];
-float output_data[2];
+float output_data[3];
 int prediction_count = 0;
 int hold_skip_count = 0;
 int confidence_skip_count = 0;

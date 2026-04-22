@@ -489,6 +489,7 @@ def main() -> None:
                     threshold_min=args.confidence_search_min,
                     threshold_max=args.confidence_search_max,
                     threshold_steps=args.confidence_search_steps,
+                    use_confidence_threshold=args.use_confidence_threshold,
                 )
                 candidate_validation_gate = compute_gate_metrics(
                     candidate_val_labels,
@@ -1024,6 +1025,7 @@ def main() -> None:
         threshold_min=args.confidence_search_min,
         threshold_max=args.confidence_search_max,
         threshold_steps=args.confidence_search_steps,
+        use_confidence_threshold=args.use_confidence_threshold,
     )
     validation_gate = log_gate_summary(
         "validation", val_probs, val_labels, selected_primary_confidence

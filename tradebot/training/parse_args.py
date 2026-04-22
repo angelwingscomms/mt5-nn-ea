@@ -75,4 +75,5 @@ def parse_args() -> argparse.Namespace:
         confidence_search_min=float(values.get("CONFIDENCE_SEARCH_MIN", DEFAULT_CONFIDENCE_SEARCH_MIN)),
         confidence_search_max=float(values.get("CONFIDENCE_SEARCH_MAX", DEFAULT_CONFIDENCE_SEARCH_MAX)),
         confidence_search_steps=int(values.get("CONFIDENCE_SEARCH_STEPS", DEFAULT_CONFIDENCE_SEARCH_STEPS)),
+        use_confidence_threshold=bool(values.get("USE_CONFIDENCE_THRESHOLD", True)),
     )
