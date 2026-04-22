@@ -689,6 +689,7 @@ def main() -> None:
                 "tla",
                 "au",
                 "i9",
+                "tkan",
                 "legacy_lstm_attention",
                 "gold_legacy",
                 "gold_new",
