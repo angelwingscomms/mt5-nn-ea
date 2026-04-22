@@ -923,11 +923,15 @@ def main() -> None:
         best_state = None
         best_val_loss = float("inf")
         best_train_loss = float("inf")
+        best_val_accuracy = 0.0
+        best_train_accuracy = 0.0
         wait = 0
 
         for epoch in tqdm(range(args.epochs), desc="Training"):
             training_model.train()
             train_losses = []
+            train_correct = 0
+            train_total = 0
             for xb, yb in tqdm(
                 train_loader, desc=f"Epoch {epoch + 1}/{args.epochs}", leave=False
             ):
@@ -948,8 +952,13 @@ def main() -> None:
                 torch.nn.utils.clip_grad_norm_(training_model.parameters(), 1.0)
                 optimizer.step()
                 train_losses.append(float(loss.item()))
+                with torch.no_grad():
+                    preds = logits.argmax(dim=1)
+                    train_correct += int((preds == yb_flipped.to(device)).sum())
+                    train_total += yb_flipped.size(0)
 
             current_train_loss = float(np.mean(train_losses))
+            current_train_accuracy = 100.0 * train_correct / train_total if train_total > 0 else 0.0
             val_logits, val_labels = run_model_evaluation(
                 training_model, val_loader, device
             )
@@ -967,15 +976,22 @@ def main() -> None:
                     torch.tensor(val_labels_flipped, dtype=torch.long, device=device),
                 ).item()
             )
+            val_preds = np.argmax(val_logits, axis=1)
+            val_correct = int((val_preds == val_labels_flipped).sum())
+            current_val_accuracy = 100.0 * val_correct / len(val_labels_flipped) if len(val_labels_flipped) > 0 else 0.0
             log.info(
-                "Epoch %02d | train_loss=%.4f val_loss=%.4f wait=%d/%d | best train_loss=%.4f val_loss=%.4f",
+                "Epoch %02d | train_loss=%.4f train_acc=%.2f%% | val_loss=%.4f val_acc=%.2f%% | wait=%d/%d | best train_loss=%.4f train_acc=%.2f%% | val_loss=%.4f val_acc=%.2f%%",
                 epoch,
                 current_train_loss,
+                current_train_accuracy,
                 val_loss,
+                current_val_accuracy,
                 wait,
                 args.patience,
                 best_train_loss,
+                best_train_accuracy,
                 best_val_loss,
+                best_val_accuracy,
             )
             if scheduler is not None:
                 scheduler.step(val_loss)
@@ -987,6 +1003,8 @@ def main() -> None:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_train_loss = current_train_loss
+                best_val_accuracy = current_val_accuracy
+                best_train_accuracy = current_train_accuracy
                 best_state = {
                     k: v.detach().cpu().clone()
                     for k, v in training_model.state_dict().items()
