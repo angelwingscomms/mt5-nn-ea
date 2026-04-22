@@ -31,21 +31,21 @@ def _load_yaml_file(path: Path) -> dict[str, Scalar]:
         return {}
 
     result: dict[str, Scalar] = {}
-    _flatten_yaml(data, "", result)
+    _flatten_yaml(data, [], result)
     return result
 
 
-def _flatten_yaml(obj: dict | list | any, prefix: str, result: dict[str, Scalar]) -> None:
-    """Recursively flatten nested YAML into flat uppercase keys."""
+def _flatten_yaml(obj: dict | list | any, path: list[str], result: dict[str, Scalar]) -> None:
+    """Recursively flatten nested YAML into flat uppercase keys (deepest key only)."""
     if isinstance(obj, dict):
         for key, value in obj.items():
-            new_prefix = f"{prefix}_{key}".upper() if prefix else key.upper()
-            _flatten_yaml(value, new_prefix, result)
+            _flatten_yaml(value, path + [key], result)
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
-            _flatten_yaml(item, f"{prefix}_{i}", result)
+            _flatten_yaml(item, path + [str(i)], result)
     else:
-        result[prefix] = obj
+        final_key = path[-1].upper() if path else ""
+        result[final_key] = obj
 
 
 def _load_config_dir(dir_path: Path) -> dict[str, Scalar]:

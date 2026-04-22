@@ -45,7 +45,6 @@ target:
   label_tp_multiplier: .54
   default_sl_multiplier: .54
   default_tp_multiplier: .54
-  seq_len: 9
   target_atr_period: 9
   use_fixed_targets: true
 
@@ -59,6 +58,7 @@ trade_sizing:
   use_risk_percent: false
 
 training:
+  seq_len: 9
   confidence_search_max: 0.99
   confidence_search_min: 0.40
   confidence_search_steps: 40
