@@ -20,17 +20,18 @@ def build_mql_config(
     iqr: np.ndarray,
     primary_confidence: float,
     use_atr_risk: bool,
-    use_fixed_time_bars: bool,
+    bar_type: str,
     architecture: str,
     use_multihead_attention: bool,
     feature_columns: tuple[str, ...],
     feature_profile: str,
     use_extended_features: bool,
-    use_fixed_tick_bars: bool,
     max_feature_lookback: int,
     warmup_bars: int,
     flip: bool = False,
 ) -> str:
+    use_fixed_time_bars = bar_type == "time"
+    use_fixed_tick_bars = bar_type == "tick"
     from tradebot.config_io import load_define_file, render_define_value as render_val
     if project.config_path.suffix in (".yaml", ".yml") or project.config_path.is_dir():
         base_values = load_define_file(project.config_path)

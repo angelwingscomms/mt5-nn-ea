@@ -116,8 +116,9 @@ def main() -> None:
         )
     use_extended_features = bool(args.use_extended_features)
     use_atr_risk = not bool(args.use_fixed_risk)
-    use_fixed_time_bars = bool(args.use_fixed_time_bars)
-    use_fixed_tick_bars = bool(args.use_fixed_tick_bars)
+    bar_type = str(args.bar_type).strip().lower()
+    use_fixed_time_bars = bar_type == "time"
+    use_fixed_tick_bars = bar_type == "tick"
     use_no_hold = bool(args.no_hold)
     flip = bool(args.flip)
     active_label_names = LABEL_NAMES_BINARY if use_no_hold else LABEL_NAMES
@@ -295,8 +296,7 @@ def main() -> None:
 
     bars, point_size = build_market_bars_frame(
         data_path,
-        use_fixed_time_bars=use_fixed_time_bars,
-        use_fixed_tick_bars=use_fixed_tick_bars,
+        bar_type=bar_type,
         tick_density=args.primary_tick_density,
         max_bars=int(args.max_bars),
         bar_duration_ms=BAR_DURATION_MS,
@@ -1113,13 +1113,12 @@ def main() -> None:
             iqr=iqr,
             primary_confidence=deployed_primary_confidence,
             use_atr_risk=use_atr_risk,
-            use_fixed_time_bars=use_fixed_time_bars,
+            bar_type=bar_type,
             architecture=architecture,
             use_multihead_attention=use_multihead_attention,
             feature_columns=feature_columns,
             feature_profile=feature_profile,
             use_extended_features=use_extended_features,
-            use_fixed_tick_bars=use_fixed_tick_bars,
             max_feature_lookback=MAX_FEATURE_LOOKBACK,
             warmup_bars=WARMUP_BARS,
             flip=flip,
@@ -1179,7 +1178,7 @@ def main() -> None:
             "holdout": len(test_end_idx),
         },
         use_atr_risk=use_atr_risk,
-        use_fixed_time_bars=use_fixed_time_bars,
+        bar_type=bar_type,
         symbol=SYMBOL,
         model_backend=model_backend,
         loss_mode=loss_mode,
@@ -1190,7 +1189,6 @@ def main() -> None:
         feature_profile=feature_profile,
         point_size=point_size,
         fixed_move_price=fixed_move_price,
-        use_fixed_tick_bars=use_fixed_tick_bars,
         tick_density=args.primary_tick_density,
         flip=flip,
     )

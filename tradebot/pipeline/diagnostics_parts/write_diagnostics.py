@@ -28,7 +28,7 @@ def write_diagnostics(
     available_window_counts: dict[str, int],
     used_window_counts: dict[str, int],
     use_atr_risk: bool,
-    use_fixed_time_bars: bool,
+    bar_type: str,
     symbol: str,
     model_backend: str,
     loss_mode: str,
@@ -39,10 +39,11 @@ def write_diagnostics(
     feature_profile: str,
     point_size: float,
     fixed_move_price: float,
-    use_fixed_tick_bars: bool,
     tick_density: int,
     flip: bool = False,
 ) -> None:
+    use_fixed_time_bars = bar_type == "time"
+    use_fixed_tick_bars = bar_type == "tick"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
     active_label_names = LABEL_NAMES if val_probs.shape[1] == 3 else LABEL_NAMES_BINARY

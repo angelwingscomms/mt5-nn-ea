@@ -9,8 +9,7 @@ def main() -> None:
 
     bars = nn.build_market_bars(
         Path("market_ticks.csv"),
-        use_fixed_time_bars=bool(args.use_fixed_time_bars),
-        use_fixed_tick_bars=False,
+        bar_type="time" if args.use_fixed_time_bars else "imb",
         tick_density=nn.DEFAULT_PRIMARY_TICK_DENSITY,
         max_bars=0,
     )

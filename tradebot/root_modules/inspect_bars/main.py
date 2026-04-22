@@ -24,11 +24,10 @@ def main() -> None:
             f"Tick CSV not found: {data_path}. Export data first or point DATA_FILE at an existing CSV."
         )
 
-    use_fixed_time_bars = bool(values.get("USE_FIXED_TIME_BARS", values.get("USE_SECOND_BARS", False)))
+    bar_type = str(values.get("BAR_TYPE", "imb")).strip().lower() or "imb"
     bars, point_size = build_market_bars_frame(
         data_path,
-        use_fixed_time_bars=use_fixed_time_bars,
-        use_fixed_tick_bars=bool(values["USE_FIXED_TICK_BARS"]),
+        bar_type=bar_type,
         tick_density=int(values["PRIMARY_TICK_DENSITY"]),
         max_bars=int(values["MAX_BARS"]) if bool(values.get("USE_MAX_BARS", False)) else 0,
         bar_duration_ms=int(values["PRIMARY_BAR_SECONDS"]) * 1000,

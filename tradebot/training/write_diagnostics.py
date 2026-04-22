@@ -25,7 +25,7 @@ def write_diagnostics(
     available_window_counts: dict[str, int],
     used_window_counts: dict[str, int],
     use_atr_risk: bool,
-    use_fixed_time_bars: bool,
+    bar_type: str,
     symbol: str,
     model_backend: str,
     loss_mode: str,
@@ -35,7 +35,6 @@ def write_diagnostics(
     feature_profile: str,
     point_size: float,
     fixed_move_price: float,
-    use_fixed_tick_bars: bool,
     tick_density: int,
     flip: bool,
 ) -> None:
@@ -74,13 +73,13 @@ def write_diagnostics(
         "## Shared Config",
         f"- seq_len: {SEQ_LEN}",
         f"- label_timeout_bars: {LABEL_TIMEOUT_BARS}",
-        f"- bar_mode: {'FIXED_TICK' if use_fixed_tick_bars else ('FIXED_TIME' if use_fixed_time_bars else 'IMBALANCE')}",
+        f"- bar_mode: {bar_type.upper()}",
         *(
             [f"- primary_bar_seconds: {PRIMARY_BAR_SECONDS}"]
-            if use_fixed_time_bars
+            if bar_type == "time"
             else (
                 [f"- primary_tick_density: {tick_density}"]
-                if use_fixed_tick_bars
+                if bar_type == "tick"
                 else [
                     f"- imbalance_min_ticks: {IMBALANCE_MIN_TICKS}",
                     f"- imbalance_ema_span: {IMBALANCE_EMA_SPAN}",
@@ -155,10 +154,10 @@ def write_diagnostics(
         "## Note",
         *(
             [f"- Bars are fixed-duration time buckets aligned to epoch time. Change PRIMARY_BAR_SECONDS in {CURRENT_CONFIG_PATH.name} to retune them, for example to 27 or 9 seconds."]
-            if use_fixed_time_bars
+            if bar_type == "time"
             else (
                 [f"- Fixed-tick bars use PRIMARY_TICK_DENSITY in {CURRENT_CONFIG_PATH.name} to set ticks per bar."]
-                if use_fixed_tick_bars
+                if bar_type == "tick"
                 else ["- Imbalance bars are variable by design. Lowering imbalance_min_ticks makes them smaller on average, but it does not force a fixed tick count per bar."]
             )
         ),

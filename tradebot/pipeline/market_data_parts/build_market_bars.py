@@ -5,8 +5,7 @@ from .shared import *  # noqa: F401,F403
 def build_market_bars(
     csv_path: Path,
     *,
-    use_fixed_time_bars: bool,
-    use_fixed_tick_bars: bool,
+    bar_type: str,
     tick_density: int,
     max_bars: int,
     bar_duration_ms: int,
@@ -16,6 +15,8 @@ def build_market_bars(
     use_imbalance_min_ticks_div3_threshold: bool,
     require_gold_context: bool = False,
 ) -> tuple[pd.DataFrame, float]:
+    use_fixed_time_bars = bar_type == "time"
+    use_fixed_tick_bars = bar_type == "tick"
     t0 = time.time()
     chunks: list[pd.DataFrame] = []
     extended_usecols = ["time_msc", "bid", "ask", *GOLD_CONTEXT_TICK_COLUMNS]

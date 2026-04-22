@@ -180,7 +180,4 @@ bars:
     primary_bar_seconds: 54
     primary_tick_density: 144
   options:
-    use_fixed_tick_bars: false
-    use_imbalance_ema_threshold: true
-    use_imbalance_min_ticks_div3_threshold: true
-    use_fixed_time_bars: true
+    bar_type: time

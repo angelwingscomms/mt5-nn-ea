@@ -9,15 +9,16 @@ def build_mql_config(
     iqr: np.ndarray,
     primary_confidence: float,
     use_atr_risk: bool,
-    use_fixed_time_bars: bool,
+    bar_type: str,
     architecture: str,
     use_multihead_attention: bool,
     feature_columns: tuple[str, ...],
     feature_profile: str,
     use_extended_features: bool,
-    use_fixed_tick_bars: bool,
     flip: bool,
 ) -> str:
+    use_fixed_time_bars = bar_type == "time"
+    use_fixed_tick_bars = bar_type == "tick"
     from common.config_io_parts import load_define_file
 
     if project.config_path.suffix in (".yaml", ".yml") or project.config_path.is_dir():

@@ -4,12 +4,13 @@ from .shared import *  # noqa: F401,F403
 
 def build_market_bars(
     csv_path: Path,
-    use_fixed_time_bars: bool,
-    use_fixed_tick_bars: bool,
+    bar_type: str,
     tick_density: int,
     max_bars: int,
     require_gold_context: bool = False,
 ) -> tuple[pd.DataFrame, float]:
+    use_fixed_time_bars = bar_type == "time"
+    use_fixed_tick_bars = bar_type == "tick"
     t0 = time.time()
     chunks = []
     extended_usecols = ["time_msc", "bid", "ask", *GOLD_CONTEXT_TICK_COLUMNS]

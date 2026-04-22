@@ -52,7 +52,7 @@ class TKAN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         lstm_out, _ = self.encoder(x)
 
-        attn_out, _ = self.attention(lstm_out, lstm_out)
+        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
         attn_out = self.attn_norm(attn_out + lstm_out)
 
         pooled = attn_out.mean(dim=1)
