@@ -23,11 +23,11 @@ if [[ -x "$ROOT_DIR/env/bin/python" ]]; then
   python_bin="$ROOT_DIR/env/bin/python"
 fi
 
-train_output="$("$python_bin" "$SCRIPT_DIR/nn.py")"
+train_output="$("$python_bin" "$SCRIPT_DIR/i.py")"
 printf '%s\n' "$train_output"
 model_folder="$(printf '%s\n' "$train_output" | awk 'NF {line=$0} END {print line}')"
 if [[ -z "$model_folder" ]]; then
-  echo "nn.py did not print a model folder name" >&2
+  echo "i.py did not print a model folder name" >&2
   exit 1
 fi
 

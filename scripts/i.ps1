@@ -13,11 +13,11 @@ if (Test-Path "$RootDir\env\Scripts\python.exe") {
   $pythonBin = "$RootDir\env\bin\python"
 }
 
-$trainOutput = & $pythonBin "$ScriptDir\nn.py"
+$trainOutput = & $pythonBin "$ScriptDir\i.py"
 $trainOutput | ForEach-Object { $_ }
 $modelFolder = ($trainOutput | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -Last 1)
 if (-not $modelFolder) {
-  throw "nn.py did not print a model folder name."
+  throw "i.py did not print a model folder name."
 }
 
 $dateRange = & $pythonBin -c @"

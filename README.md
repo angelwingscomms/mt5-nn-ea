@@ -12,7 +12,7 @@ trade-bot/
 │   ├── testrun.config
 │   └── config.mqh   # Default XAUUSD preset (copy to active.mqh to use)
 ├── scripts/         # CLI entry-points (run from repo root)
-│   ├── nn.py
+│   ├── i.py
 │   ├── test.py
 │   ├── export_data.py
 │   ├── inspect_bars.py
@@ -51,7 +51,7 @@ trade-bot/
 Run all scripts from the **repo root** directory:
 
 ```
-python scripts/nn.py            # Train, export ONNX, update live.mq5, compile EA
+python scripts/i.py            # Train, export ONNX, update live.mq5, compile EA
 python scripts/inspect_bars.py  # Show bar count for active config without training
 python scripts/test.py          # Run archived-model backtests
 python scripts/export_data.py --profile gold   # Export XAUUSD ticks + USDX/USDJPY context

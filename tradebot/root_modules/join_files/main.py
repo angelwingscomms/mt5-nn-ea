@@ -39,7 +39,7 @@ def main():
     # Include these specific files (relative to source_dir / project root)
     include_files = [
         "mt5/scripts/data.mq5",
-        "scripts/nn.py",
+        "scripts/i.py",
         "live/live.mq5",
     ]
 
