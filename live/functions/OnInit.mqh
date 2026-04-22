@@ -13,7 +13,7 @@ int OnInit() {
    input_shape[1] = SEQ_LEN;
    input_shape[2] = MODEL_FEATURE_COUNT;
 output_shape[0] = 1;
-    output_shape[1] = 2;
+    output_shape[1] = 3;
    if(!OnnxSetInputShape(onnx_handle, 0, input_shape) || !OnnxSetOutputShape(onnx_handle, 0, output_shape)) {
       Print("[FATAL] OnnxSetShape failed: ", GetLastError());
       OnnxRelease(onnx_handle);

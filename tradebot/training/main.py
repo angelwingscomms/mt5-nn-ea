@@ -292,42 +292,6 @@ def main() -> None:
 
     requested_device = str(args.device).strip() or "cpu"
     device = torch.device(requested_device)
-    log.info("Using device: %s", device)
-    log.info(
-        "Shared config | path=%s seq_len=%d label_timeout=%d atr_feature=%d atr_target=%d rv=%d ret=%d "
-        "bar_mode=%s imbalance_min_ticks=%d imbalance_ema_span=%d bar_seconds=%d tick_density=%d risk_mode=%s fixed_move_points=%.2f "
-        "label_sl=%.2f label_tp=%.2f exec_sl=%.2f exec_tp=%.2f use_all_windows=%d",
-        CURRENT_CONFIG_PATH,
-        SEQ_LEN,
-        LABEL_TIMEOUT_BARS,
-        FEATURE_ATR_PERIOD,
-        TARGET_ATR_PERIOD,
-        RV_PERIOD,
-        RETURN_PERIOD,
-        "FIXED_TICK"
-        if use_fixed_tick_bars
-        else ("FIXED_TIME" if use_fixed_time_bars else "IMBALANCE"),
-        IMBALANCE_MIN_TICKS,
-        IMBALANCE_EMA_SPAN,
-        PRIMARY_BAR_SECONDS,
-        args.primary_tick_density,
-        "ATR" if use_atr_risk else "FIXED",
-        DEFAULT_FIXED_MOVE,
-        LABEL_SL_MULTIPLIER,
-        LABEL_TP_MULTIPLIER,
-        EXECUTION_SL_MULTIPLIER,
-        EXECUTION_TP_MULTIPLIER,
-        int(USE_ALL_WINDOWS),
-    )
-    log.info(
-        "Run config | symbol=%s architecture=%s attention=%d focal_gamma=%.2f feature_profile=%s feature_count=%d",
-        SYMBOL,
-        architecture.upper(),
-        int(use_multihead_attention),
-        args.focal_gamma,
-        feature_profile,
-        feature_count,
-    )
 
     bars, point_size = build_market_bars_frame(
         data_path,
