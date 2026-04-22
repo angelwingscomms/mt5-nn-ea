@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from .build_prediction_frame import LABEL_NAMES, LABEL_NAMES_BINARY, build_prediction_frame
+from .confusion_matrix_df import confusion_matrix_df
 from .shared import *  # noqa: F401,F403
 
 
@@ -43,21 +45,22 @@ def write_diagnostics(
 ) -> None:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
+    active_label_names = LABEL_NAMES if val_probs.shape[1] == 3 else LABEL_NAMES_BINARY
     val_predictions = build_prediction_frame(
-        y_val, val_probs, selected_primary_confidence, label_names, flip
+        y_val, val_probs, selected_primary_confidence, active_label_names, flip
     )
     test_predictions = build_prediction_frame(
-        y_test, test_probs, selected_primary_confidence, label_names, flip
+        y_test, test_probs, selected_primary_confidence, active_label_names, flip
     )
     val_confusion = confusion_matrix_df(
         y_val,
         val_predictions["pred_label"].to_numpy(dtype=np.int64),
-        label_names,
+        active_label_names,
     )
     test_confusion = confusion_matrix_df(
         y_test,
         test_predictions["pred_label"].to_numpy(dtype=np.int64),
-        label_names,
+        active_label_names,
     )
 
     bar_stats = bars.loc[

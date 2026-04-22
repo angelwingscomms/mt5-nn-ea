@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from .shared import *  # noqa: F401,F403
+from .build_prediction_frame import build_prediction_frame
+from .confusion_matrix_df import confusion_matrix_df
+from .summarize_numeric import summarize_numeric
+from .class_count_lines import class_count_lines
+from .format_metric import format_metric
 
 def write_diagnostics(
     diagnostics_dir: Path,
@@ -37,14 +42,8 @@ def write_diagnostics(
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
     active_label_names = LABEL_NAMES_BINARY if val_probs.shape[1] == 2 else LABEL_NAMES
-    val_predictions = build_prediction_frame(y_val, val_probs, selected_primary_confidence, flip)
-    test_predictions = build_prediction_frame(y_test, test_probs, selected_primary_confidence, flip)
-    val_confusion = confusion_matrix_df(
-        y_val, val_predictions["pred_label"].to_numpy(dtype=np.int64), active_label_names
-    )
-    test_confusion = confusion_matrix_df(
-        y_test, test_predictions["pred_label"].to_numpy(dtype=np.int64), active_label_names
-    )
+    val_predictions = build_prediction_frame(y_val, val_probs, selected_primary_confidence, active_label_names, flip)
+    test_predictions = build_prediction_frame(y_test, test_probs, selected_primary_confidence, active_label_names, flip)
 
     bar_stats = bars.loc[
         :,
