@@ -23,7 +23,7 @@ model_identity:
 
 architecture:
   main:
-    model_architecture: tkan
+    model_architecture: au
   sequence:
     sequence_dropout: 0.2
     sequence_hidden_size: 64
@@ -69,7 +69,7 @@ training:
   default_max_train_windows: 54000
   default_patience: 27
   focal_gamma: 2.0
-  learning_rate: 0.00001
+  learning_rate: 0.001
   loss_mode: auto
   minirocket_features: 10080
   min_selected_trades: 15
